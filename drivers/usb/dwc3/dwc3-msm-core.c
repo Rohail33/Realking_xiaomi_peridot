@@ -315,6 +315,18 @@ struct dload_struct {
 	u32	serial_magic;
 };
 
+struct usb_udc {
+	struct usb_gadget_driver	*driver;
+	struct usb_gadget		*gadget;
+	struct device			dev;
+	struct list_head		list;
+	bool				vbus;
+	bool				started;
+	bool				allow_connect;
+	struct work_struct		vbus_work;
+	struct mutex			connect_lock;
+};
+
 struct dwc3_hw_ep {
 	struct dwc3_ep		*dep;
 	enum usb_hw_ep_mode	mode;
@@ -648,8 +660,8 @@ struct dwc3_msm {
 	u8			qos_rec_index;
 	u32			qos_rec_irq[PM_QOS_REC_MAX_RECORD];
 
-	int repeater_rev;
-	bool force_disconnect;
+	int			repeater_rev;
+	bool			force_disconnect;
 };
 
 #define USB_HSPHY_3P3_VOL_MIN		3050000 /* uV */
@@ -3475,6 +3487,13 @@ void dwc3_msm_notify_event(struct dwc3 *dwc,
 	case DWC3_CONTROLLER_CONNDONE_EVENT:
 		dev_dbg(mdwc->dev, "DWC3_CONTROLLER_CONNDONE_EVENT received\n");
 
+		if ((dwc->speed != DWC3_DSTS_SUPERSPEED) &&
+			(dwc->speed != DWC3_DSTS_SUPERSPEED_PLUS)) {
+			reg = dwc3_msm_read_reg(mdwc->base, DWC3_GUSB3PIPECTL(0));
+			reg |= DWC3_GUSB3PIPECTL_SUSPHY;
+			dwc3_msm_write_reg(mdwc->base, DWC3_GUSB3PIPECTL(0), reg);
+		}
+
 		/*
 		 * SW WA for CV9 RESET DEVICE TEST(TD 9.23) compliance failure.
 		 * Visit eUSB2 phy driver for more details.
@@ -3573,6 +3592,16 @@ void dwc3_msm_notify_event(struct dwc3 *dwc,
 		break;
 	case DWC3_CONTROLLER_NOTIFY_CLEAR_DB:
 		dev_dbg(mdwc->dev, "DWC3_CONTROLLER_NOTIFY_CLEAR_DB\n");
+
+		/*
+		 * Clear the susphy bit here to ensure it is not set during
+		 * the course of controller initialisation process.
+		 */
+		reg = dwc3_msm_read_reg(mdwc->base, DWC3_GUSB3PIPECTL(0));
+		reg &= ~(DWC3_GUSB3PIPECTL_SUSPHY);
+		dwc3_msm_write_reg(mdwc->base, DWC3_GUSB3PIPECTL(0), reg);
+		udelay(1000);
+
 		handle_gsi_clear_db(dwc);
 		break;
 	case DWC3_IMEM_UPDATE_PID:
@@ -5357,7 +5386,7 @@ static ssize_t bus_vote_store(struct device *dev,
 		mdwc->override_bus_vote = BUS_VOTE_MIN;
 	} else if (sysfs_streq(buf, "max")) {
 		bv_fixed = true;
-		mdwc->override_bus_vote = BUS_VOTE_MAX;
+		mdwc->override_bus_vote = BUS_VOTE_NOMINAL;
 	} else if (sysfs_streq(buf, "cancel")) {
 		bv_fixed = false;
 		mdwc->override_bus_vote = BUS_VOTE_NONE;
@@ -5891,12 +5920,6 @@ static int dwc3_msm_core_init(struct dwc3_msm *mdwc)
 		of_node_put(dwc3_node);
 		goto err;
 	}
-
-	/*
-	 * Wait for child's probe completion before retrieving the
-	 * driver data to make sure its populated properly.
-	 */
-	wait_for_device_probe();
 
 	mdwc->dwc3 = of_find_device_by_node(dwc3_node);
 	of_node_put(dwc3_node);
@@ -6481,6 +6504,7 @@ static int dwc3_msm_probe(struct platform_device *pdev)
 
 		dwc3_ext_event_notify(mdwc);
 	}
+
 	mdwc->force_disconnect = false;
 	return 0;
 
@@ -6845,6 +6869,8 @@ static void msm_dwc3_perf_vote_enable(struct dwc3_msm *mdwc, bool enable)
 		schedule_delayed_work(&mdwc->perf_vote_work,
 				msecs_to_jiffies(PM_QOS_DEFAULT_SAMPLE_MS));
 	} else {
+		if (!mdwc->pm_qos_latency_cfg)
+			return;
 		cancel_delayed_work_sync(&mdwc->perf_vote_work);
 		msm_dwc3_perf_vote_update(mdwc, false);
 		cpu_latency_qos_remove_request(&mdwc->pm_qos_req_dma);
@@ -7063,6 +7089,7 @@ static void dwc3_override_vbus_status(struct dwc3_msm *mdwc, bool vbus_present)
 static int dwc3_otg_start_peripheral(struct dwc3_msm *mdwc, int on)
 {
 	struct dwc3 *dwc = platform_get_drvdata(mdwc->dwc3);
+	unsigned long flags;
 	int timeout = 100;
 	unsigned long flags;
 	int ret;
@@ -7128,21 +7155,20 @@ static int dwc3_otg_start_peripheral(struct dwc3_msm *mdwc, int on)
 
 		usb_role_switch_set_role(mdwc->dwc3_drd_sw, USB_ROLE_DEVICE);
 		clk_set_rate(mdwc->core_clk, mdwc->core_clk_rate);
+
 		/*
 		 * Check udc->driver to find out if we are bound to udc or not.
-		*/
-
+		 */
 		spin_lock_irqsave(&dwc->lock, flags);
-		if ((mdwc->force_disconnect) && (dwc->gadget_driver) && (!dwc->softconnect)) {
+		if ((mdwc->force_disconnect) && (!dwc->softconnect) &&
+			(dwc->gadget) && (dwc->gadget->udc->driver)) {
 			spin_unlock_irqrestore(&dwc->lock, flags);
 			dbg_event(0xFF, "Force Pullup", 0);
 			usb_gadget_connect(dwc->gadget);
 			spin_lock_irqsave(&dwc->lock, flags);
 		}
-
 		spin_unlock_irqrestore(&dwc->lock, flags);
 		mdwc->force_disconnect = false;
-
 	} else {
 		dev_dbg(mdwc->dev, "%s: turn off gadget\n", __func__);
 
@@ -7175,15 +7201,17 @@ static int dwc3_otg_start_peripheral(struct dwc3_msm *mdwc, int on)
 
 		if ((timeout == 0) && (dwc->connected)) {
 			dbg_event(0xFF, "Force Pulldown", 0);
+
 			/*
-			* Since we are not taking the udc_lock, there is a
-			* chance that this might race with gadget_remove driver
-			* in case this is called in parallel to UDC getting
-			* cleared in userspace
-			*/
+			 * Since we are not taking the udc_lock, there is a
+			 * chance that this might race with gadget_remove driver
+			 * in case this is called in parallel to UDC getting
+			 * cleared in userspace
+			 */
 			usb_gadget_disconnect(dwc->gadget);
 			mdwc->force_disconnect = true;
 		}
+
 		/* wait for LPM, to ensure h/w is reset after stop_peripheral */
 		set_bit(WAIT_FOR_LPM, &mdwc->inputs);
 

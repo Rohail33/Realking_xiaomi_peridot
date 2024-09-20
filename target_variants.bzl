@@ -84,6 +84,11 @@ vm_variants = [
     "defconfig",
 ]
 
+lunch_target_bases = {
+    # keep sorted
+    "volcano": "pineapple",
+}
+
 def get_all_la_variants():
     return [(t, v) for t in la_targets for v in la_variants]
 
@@ -99,5 +104,5 @@ def get_all_vm_variants():
 def get_all_variants():
     return get_all_la_variants() + get_all_le_variants() + get_all_lxc_variants() + get_all_vm_variants()
 
-def get_arch_of_target(target):
-    return target_arch_map[target] 
+def get_all_lunch_target_base_target_variants():
+    return [(lt, bt, v) for lt, bt in lunch_target_bases.items() for v in la_variants]

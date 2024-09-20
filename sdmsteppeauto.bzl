@@ -76,7 +76,6 @@ def define_sdmsteppeauto():
         "drivers/misc/qseecom_proxy.ko",
         "drivers/mmc/host/cqhci.ko",
         "drivers/mmc/host/sdhci-msm.ko",
-        "drivers/mmc/host/sdhci-msm-scaling.ko",
         "drivers/nvmem/nvmem_qcom-spmi-sdam.ko",
         "drivers/nvmem/nvmem_qfprom.ko",
         "drivers/pci/controller/pci-msm-drv.ko",
@@ -180,6 +179,7 @@ def define_sdmsteppeauto():
     _sdmsteppeauto_consolidate_in_tree_modules = _sdmsteppeauto_in_tree_modules + [
         # keep sorted
         "drivers/misc/lkdtm/lkdtm.ko",
+        "drivers/usb/misc/lvstest.ko",
         "kernel/locking/locktorture.ko",
         "kernel/rcu/rcutorture.ko",
         "kernel/torture.ko",

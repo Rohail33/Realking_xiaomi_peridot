@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -92,13 +92,13 @@
 		.intr_detection_width = -1,                        \
 	}
 
-#define UFS_RESET(pg_name, offset)                                 \
+#define UFS_RESET(pg_name, offset, io)                                 \
 	{                                                          \
 		.name = #pg_name,                                  \
 		.pins = pg_name##_pins,                            \
 		.npins = (unsigned int)ARRAY_SIZE(pg_name##_pins), \
 		.ctl_reg = offset,                                 \
-		.io_reg = offset + 0x4,                            \
+		.io_reg = io,                                      \
 		.intr_cfg_reg = 0,                                 \
 		.intr_status_reg = 0,                              \
 		.intr_target_reg = 0,                              \
@@ -2112,7 +2112,7 @@ static const struct msm_pingroup volcano_groups[] = {
 			 egpio, 0, -1),
 	[166] = PINGROUP(166, qdss_gpio9, NA, NA, NA, NA, NA, NA, NA, NA, NA,
 			 egpio, 0, -1),
-	[167] = UFS_RESET(ufs_reset, 0x1B4004),
+	[167] = UFS_RESET(ufs_reset, 0x1B4004, 0x1B5000),
 	[168] = SDC_QDSD_PINGROUP(sdc2_clk, 0x1AB000, 0, 6),
 	[169] = SDC_QDSD_PINGROUP(sdc2_cmd, 0x1AB000, 12, 3),
 	[170] = SDC_QDSD_PINGROUP(sdc2_data, 0x1AB000, 9, 0),
@@ -2157,8 +2157,20 @@ static const struct msm_pinctrl_soc_data volcano_pinctrl = {
 	.egpio_func = 11,
 };
 
+static const struct msm_pinctrl_soc_data volcano_vm_pinctrl = {
+	.pins = volcano_pins,
+	.npins = ARRAY_SIZE(volcano_pins),
+	.functions = volcano_functions,
+	.nfunctions = ARRAY_SIZE(volcano_functions),
+	.groups = volcano_groups,
+	.ngroups = ARRAY_SIZE(volcano_groups),
+	.ngpios = 168,
+	.egpio_func = 11,
+};
+
 static const struct of_device_id volcano_pinctrl_of_match[] = {
 	{ .compatible = "qcom,volcano-pinctrl", .data = &volcano_pinctrl },
+	{ .compatible = "qcom,volcano-vm-pinctrl", .data = &volcano_vm_pinctrl },
 	{},
 };
 
@@ -2198,3 +2210,4 @@ module_exit(volcano_pinctrl_exit);
 MODULE_DESCRIPTION("QTI volcano pinctrl driver");
 MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(of, volcano_pinctrl_of_match);
+MODULE_SOFTDEP("pre: qcom_tlmm_vm_irqchip");

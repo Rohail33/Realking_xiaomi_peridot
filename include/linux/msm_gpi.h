@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef __MSM_GPI_H_
@@ -246,10 +246,12 @@ if (print) { \
 
 /* cmds to perform by using dmaengine_slave_config() */
 enum msm_gpi_ctrl_cmd {
+	MSM_GPI_DEFAULT,
 	MSM_GPI_INIT,
 	MSM_GPI_CMD_UART_SW_STALE,
 	MSM_GPI_CMD_UART_RFR_READY,
 	MSM_GPI_CMD_UART_RFR_NOT_READY,
+	MSM_GPI_DEEP_SLEEP_INIT,
 };
 
 enum msm_gpi_cb_event {
@@ -428,8 +430,25 @@ int gsi_common_tx_tre_optimization(struct gsi_common *gsi, u32 num_xfers, u32 nu
 				   u32 xfer_timeout, struct device *wrapper_dev);
 
 /**
+ * geni_gsi_ch_start() - gsi channel command to start the GSI RX and TX channels
+ * @chan: dma channel handle
+ *
+ * Return: Returns success or failure
+ */
+int geni_gsi_ch_start(struct dma_chan *chan);
+
+/**
+ * geni_gsi_disconnect_doorbell_stop_ch() - function to disconnect gsi doorbell and stop channel
+ * @chan: dma channel handle
+ *
+ * Return: Returns success or failure
+ */
+int geni_gsi_disconnect_doorbell_stop_ch(struct dma_chan *chan, bool stop_ch);
+
+/**
  * geni_gsi_common_request_channel() - gsi common dma request channel
  * @gsi: Base address of gsi common
+ * @stop_ch: stop channel if set to true
  *
  * Return: Returns success or failure
  */
