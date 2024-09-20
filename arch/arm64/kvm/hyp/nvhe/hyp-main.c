@@ -1241,14 +1241,14 @@ static void handle___pkvm_enable_tracing(struct kvm_cpu_context *host_ctxt)
 
 static void handle___pkvm_rb_swap_reader_page(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(int, cpu, host_ctxt, 1);
+	DECLARE_REG(unsigned int, cpu, host_ctxt, 1);
 
 	cpu_reg(host_ctxt, 1) = __pkvm_rb_swap_reader_page(cpu);
 }
 
 static void handle___pkvm_rb_update_footers(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(int, cpu, host_ctxt, 1);
+	DECLARE_REG(unsigned int, cpu, host_ctxt, 1);
 
 	cpu_reg(host_ctxt, 1) = __pkvm_rb_update_footers(cpu);
 }
@@ -1334,7 +1334,7 @@ static void handle_host_hcall(struct kvm_cpu_context *host_ctxt)
 	hcall_t hfn;
 
 	if (handle_host_dynamic_hcall(host_ctxt) == HCALL_HANDLED)
-		return;
+		goto end;
 
 	/*
 	 * If pKVM has been initialised then reject any calls to the
@@ -1359,7 +1359,7 @@ static void handle_host_hcall(struct kvm_cpu_context *host_ctxt)
 
 	cpu_reg(host_ctxt, 0) = SMCCC_RET_SUCCESS;
 	hfn(host_ctxt);
-
+end:
 	trace_host_hcall(id, 0);
 
 	return;

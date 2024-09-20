@@ -42,6 +42,9 @@ DECLARE_HOOK(android_vh_rtmutex_wait_start,
 DECLARE_HOOK(android_vh_rtmutex_wait_finish,
 	TP_PROTO(struct rt_mutex_base *lock),
 	TP_ARGS(lock));
+DECLARE_HOOK(android_vh_rt_mutex_steal,
+	TP_PROTO(int waiter_prio, int top_waiter_prio, bool *ret),
+	TP_ARGS(waiter_prio, top_waiter_prio, ret));
 
 DECLARE_HOOK(android_vh_rwsem_read_wait_start,
 	TP_PROTO(struct rw_semaphore *sem),
@@ -87,6 +90,15 @@ DECLARE_HOOK(android_vh_record_pcpu_rwsem_time_early,
 DECLARE_HOOK(android_vh_percpu_rwsem_wq_add,
 	TP_PROTO(struct percpu_rw_semaphore *sem, bool reader),
 	TP_ARGS(sem, reader));
+DECLARE_HOOK(android_vh_percpu_rwsem_down_read,
+	TP_PROTO(struct percpu_rw_semaphore *sem, bool try, bool *ret),
+	TP_ARGS(sem, try, ret));
+DECLARE_HOOK(android_vh_percpu_rwsem_up_write,
+	TP_PROTO(struct percpu_rw_semaphore *sem),
+	TP_ARGS(sem));
+DECLARE_RESTRICTED_HOOK(android_rvh_percpu_rwsem_wait_complete,
+	TP_PROTO(struct percpu_rw_semaphore *sem, long state, bool *complete),
+	TP_ARGS(sem, state, complete), 1);
 
 struct mutex_waiter;
 DECLARE_HOOK(android_vh_alter_mutex_list_add,
@@ -120,6 +132,14 @@ DECLARE_HOOK(android_vh_exit_check,
 DECLARE_HOOK(android_vh_freeze_whether_wake,
 	TP_PROTO(struct task_struct *t, bool *wake),
 	TP_ARGS(t, wake));
+
+DECLARE_HOOK(android_vh_read_lazy_flag,
+	TP_PROTO(int *thread_lazy_flag, unsigned long *thread_flags),
+	TP_ARGS(thread_lazy_flag, thread_flags));
+
+DECLARE_HOOK(android_vh_set_tsk_need_resched_lazy,
+	TP_PROTO(struct task_struct *p, struct rq *rq, int *need_lazy),
+	TP_ARGS(p, rq, need_lazy));
 
 #endif /* _TRACE_HOOK_DTASK_H */
 

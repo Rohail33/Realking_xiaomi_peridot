@@ -68,12 +68,15 @@ DEFINE_COOKIE(net_cookie);
 
 static struct net_generic *net_alloc_generic(void)
 {
+	unsigned int gen_ptrs = READ_ONCE(max_gen_ptrs);
+	unsigned int generic_size;
 	struct net_generic *ng;
-	unsigned int generic_size = offsetof(struct net_generic, ptr[max_gen_ptrs]);
+
+	generic_size = offsetof(struct net_generic, ptr[gen_ptrs]);
 
 	ng = kzalloc(generic_size, GFP_KERNEL);
 	if (ng)
-		ng->s.len = max_gen_ptrs;
+		ng->s.len = gen_ptrs;
 
 	return ng;
 }
@@ -1093,9 +1096,13 @@ void __init net_ns_init(void)
 	struct net_generic *ng;
 
 #ifdef CONFIG_NET_NS
-	net_cachep = kmem_cache_create("net_namespace", sizeof(struct net),
-					SMP_CACHE_BYTES,
-					SLAB_PANIC|SLAB_ACCOUNT, NULL);
+	/* Allocate size for struct ext_net instead of struct net
+	 * to fix a KMI issue when CONFIG_NETFILTER_FAMILY_BRIDGE
+	 * is enabled
+	 */
+	net_cachep = kmem_cache_create("net_namespace", sizeof(struct ext_net),
+				       SMP_CACHE_BYTES,
+				       SLAB_PANIC | SLAB_ACCOUNT, NULL);
 
 	/* Create workqueue for cleanup */
 	netns_wq = create_singlethread_workqueue("netns");
@@ -1217,7 +1224,11 @@ static int register_pernet_operations(struct list_head *list,
 		if (error < 0)
 			return error;
 		*ops->id = error;
-		max_gen_ptrs = max(max_gen_ptrs, *ops->id + 1);
+		/* This does not require READ_ONCE as writers already hold
+		 * pernet_ops_rwsem. But WRITE_ONCE is needed to protect
+		 * net_alloc_generic.
+		 */
+		WRITE_ONCE(max_gen_ptrs, max(max_gen_ptrs, *ops->id + 1));
 	}
 	error = __register_pernet_operations(list, ops);
 	if (error) {

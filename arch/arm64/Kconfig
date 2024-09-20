@@ -642,7 +642,6 @@ config ARM64_WORKAROUND_REPEAT_TLBI
 
 config ARM64_ERRATUM_2441007
 	bool "Cortex-A55: Completion of affected memory accesses might not be guaranteed by completion of a TLBI"
-	default y
 	select ARM64_WORKAROUND_REPEAT_TLBI
 	help
 	  This option adds a workaround for ARM Cortex-A55 erratum #2441007.
@@ -881,7 +880,6 @@ config ARM64_ERRATUM_2224489
 
 config ARM64_ERRATUM_2441009
 	bool "Cortex-A510: Completion of affected memory accesses might not be guaranteed by completion of a TLBI"
-	default y
 	select ARM64_WORKAROUND_REPEAT_TLBI
 	help
 	  This option adds a workaround for ARM Cortex-A510 erratum #2441009.
@@ -969,6 +967,23 @@ config ARM64_ERRATUM_2457168
 	  Work around this problem by returning 0 when reading the affected counter in
 	  key locations that results in disabling all users of this counter. This effect
 	  is the same to firmware disabling affected counters.
+
+	  If unsure, say Y.
+
+config ARM64_WORKAROUND_SPECULATIVE_UNPRIV_LOAD
+	bool
+
+config ARM64_ERRATUM_2966298
+	bool "Cortex-A520: 2966298: workaround for speculatively executed unprivileged load"
+	select ARM64_WORKAROUND_SPECULATIVE_UNPRIV_LOAD
+	default y
+	help
+	  This option adds the workaround for ARM Cortex-A520 erratum 2966298.
+
+	  On an affected Cortex-A520 core, a speculatively executed unprivileged
+	  load might leak data from a privileged level via a cache side channel.
+
+	  Work around this problem by executing a TLBI before returning to EL0.
 
 	  If unsure, say Y.
 
@@ -1309,6 +1324,8 @@ choice
 config CPU_BIG_ENDIAN
 	bool "Build big-endian kernel"
 	depends on !LD_IS_LLD || LLD_VERSION >= 130000
+	# https://github.com/llvm/llvm-project/commit/1379b150991f70a5782e9a143c2ba5308da1161c
+	depends on AS_IS_GNU || AS_VERSION >= 150000
 	help
 	  Say Y if you plan on running a kernel with a big-endian userspace.
 
@@ -1751,7 +1768,6 @@ config ARM64_LSE_ATOMICS
 
 config ARM64_USE_LSE_ATOMICS
 	bool "Atomic instructions"
-	depends on JUMP_LABEL
 	default y
 	help
 	  As part of the Large System Extensions, ARMv8.1 introduces new

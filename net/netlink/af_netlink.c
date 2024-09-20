@@ -71,7 +71,8 @@
 #include <net/netlink.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/netlink.h>
-
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/net.h>
 #include "af_netlink.h"
 
 struct listeners {
@@ -167,7 +168,7 @@ static inline u32 netlink_group_mask(u32 group)
 static struct sk_buff *netlink_to_full_skb(const struct sk_buff *skb,
 					   gfp_t gfp_mask)
 {
-	unsigned int len = skb_end_offset(skb);
+	unsigned int len = skb->len;
 	struct sk_buff *new;
 
 	new = alloc_skb(len, gfp_mask);
@@ -374,7 +375,7 @@ static void netlink_skb_destructor(struct sk_buff *skb)
 	if (is_vmalloc_addr(skb->head)) {
 		if (!skb->cloned ||
 		    !atomic_dec_return(&(skb_shinfo(skb)->dataref)))
-			vfree(skb->head);
+			vfree_atomic(skb->head);
 
 		skb->head = NULL;
 	}
@@ -1966,6 +1967,15 @@ out:
 	return err ? : copied;
 }
 
+static __poll_t netlink_poll(struct file *file, struct socket *sock,
+			     poll_table *wait)
+{
+	__poll_t mask = datagram_poll(file, sock, wait);
+
+	trace_android_vh_netlink_poll(file, sock, wait, &mask);
+	return mask;
+}
+
 static void netlink_data_ready(struct sock *sk)
 {
 	BUG();
@@ -2766,7 +2776,7 @@ static const struct proto_ops netlink_ops = {
 	.socketpair =	sock_no_socketpair,
 	.accept =	sock_no_accept,
 	.getname =	netlink_getname,
-	.poll =		datagram_poll,
+	.poll =		netlink_poll,
 	.ioctl =	netlink_ioctl,
 	.listen =	sock_no_listen,
 	.shutdown =	sock_no_shutdown,

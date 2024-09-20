@@ -426,7 +426,12 @@ static int fuse_dentry_canonical_path(const struct path *path,
 
 #ifdef CONFIG_FUSE_BPF
 	struct fuse_err_ret fer;
+#endif
 
+	if (fm->fc->no_dentry_canonical_path)
+		goto out;
+
+#ifdef CONFIG_FUSE_BPF
 	fer = fuse_bpf_backing(inode, struct fuse_dummy_io,
 			       fuse_canonical_path_initialize,
 			       fuse_canonical_path_backing,
@@ -453,9 +458,13 @@ static int fuse_dentry_canonical_path(const struct path *path,
 	free_page((unsigned long)path_name);
 	if (err > 0)
 		return 0;
-	if (err < 0)
+	if (err < 0 && err != -ENOSYS)
 		return err;
 
+	if (err == -ENOSYS)
+		fm->fc->no_dentry_canonical_path = 1;
+
+out:
 	canonical_path->dentry = path->dentry;
 	canonical_path->mnt = path->mnt;
 	path_get(canonical_path);
@@ -567,6 +576,10 @@ int fuse_lookup_name(struct super_block *sb, u64 nodeid, const struct qstr *name
 			goto out_put_forget;
 		if (fuse_invalid_attr(&outarg->attr))
 			goto out_put_forget;
+		if (outarg->nodeid == FUSE_ROOT_ID && outarg->generation != 0) {
+			pr_warn_once("root generation should be zero\n");
+			outarg->generation = 0;
+		}
 
 		*inode = fuse_iget(sb, outarg->nodeid, outarg->generation,
 				   &outarg->attr, entry_attr_timeout(outarg),
