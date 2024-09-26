@@ -85,10 +85,8 @@ int hgsl_sysfs_client_init(struct hgsl_priv *priv)
 			hgsl->clients_sysfs,
 			name);
 
-	if (unlikely(ret != 0)) {
-		kobject_put(&priv->sysfs_client);
+	if (unlikely(ret != 0))
 		pr_warn("Create sysfs proc node failed.\n");
-	}
 
 	return ret;
 }
@@ -143,7 +141,11 @@ void hgsl_sysfs_release(struct platform_device *pdev)
 	struct qcom_hgsl *hgsl;
 
 	hgsl = platform_get_drvdata(pdev);
-	sysfs_remove_files(&hgsl->dev->kobj, _attrs);
-	kobject_put(hgsl->clients_sysfs);
+
+	sysfs_remove_files(&hgsl->class_dev->kobj, _attrs);
+	if (hgsl->clients_sysfs) {
+		kobject_put(hgsl->clients_sysfs);
+		hgsl->clients_sysfs = NULL;
+	}
 }
 

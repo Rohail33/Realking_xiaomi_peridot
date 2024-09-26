@@ -318,7 +318,7 @@ struct uhab_context {
 	struct list_head exp_rxq;
 	spinlock_t expq_lock;
 
-	struct list_head imp_whse;
+	HAB_RB_ROOT imp_whse;
 	spinlock_t imp_lock;
 	uint32_t import_total;
 
@@ -335,6 +335,12 @@ struct uhab_context {
 	int closing;
 	int kernel;
 	int owner;
+	/*
+	 * only used for user-space hab client
+	 * if created through /dev/hab-* node, mmid_grp_index = MMID / 100
+	 * if created through /dev/hab node, mmid_grp_index = 0
+	 */
+	int mmid_grp_index;
 
 	int lb_be; /* loopback only */
 };
@@ -356,10 +362,12 @@ struct local_vmid {
 };
 
 struct hab_driver {
-	struct device *dev; /* mmid dev list */
-	struct cdev cdev;
+	/* hab driver has many char devices, so we need an array of struct device pointers. */
+	struct device **dev;
+	struct cdev *cdev;
 	dev_t major;
 	struct class *class;
+
 	int ndevices;
 	struct hab_device *devp;
 	struct uhab_context *kctx;
@@ -502,6 +510,8 @@ struct export_desc_super {
 	enum exp_desc_state import_state;
 	enum export_state exp_state;
 	uint32_t remote_imported;
+
+	HAB_RB_ENTRY node;
 
 	/*
 	 * exp must be the last member
@@ -758,4 +768,9 @@ int hab_stat_log(struct physical_channel **pchans, int pchan_cnt, char *dest,
 			int dest_size);
 int hab_stat_buffer_print(char *dest,
 		int dest_size, const char *fmt, ...);
+int hab_create_cdev_node(int mmid_grp_index);
+
+struct export_desc_super *hab_rb_exp_insert(struct rb_root *root, struct export_desc_super *exp_s);
+struct export_desc_super *hab_rb_exp_find(struct rb_root *root, struct export_desc_super *key);
+
 #endif /* __HAB_H */

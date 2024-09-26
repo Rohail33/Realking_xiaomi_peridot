@@ -157,6 +157,7 @@ target_arch_in_tree_modules = [
         "drivers/soc/qcom/crypto-qti.ko",
         "drivers/soc/qcom/dcc_v2.ko",
         "drivers/soc/qcom/dcvs/bwmon.ko",
+        "drivers/soc/qcom/dcvs/bwprof.ko",
         "drivers/soc/qcom/dcvs/c1dcvs_scmi_v2.ko",
         "drivers/soc/qcom/dcvs/cpufreq_stats_scmi_v2.ko",
         "drivers/soc/qcom/dcvs/dcvs_fp.ko",
@@ -338,7 +339,6 @@ def define_pineapple():
             variant = variant,
             in_tree_module_list = mod_list,
             boot_image_opts = boot_image_opts(
-                earlycon_addr = "qcom_geni,0x00a9C000",
                 kernel_vendor_cmdline_extras = kernel_vendor_cmdline_extras,
                 board_kernel_cmdline_extras = board_kernel_cmdline_extras,
                 board_bootconfig_extras = board_bootconfig_extras,

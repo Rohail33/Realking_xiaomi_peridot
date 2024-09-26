@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2019, 2021 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
+#define pr_fmt(fmt)     "qcom-reboot-reason: %s: " fmt, __func__
 
 #include <linux/err.h>
 #include <linux/init.h>
@@ -87,6 +89,7 @@ EXPORT_SYMBOL(ufs_ffu_reboot_reason_reboot);
 static int qcom_reboot_reason_reboot(struct notifier_block *this,
 				     unsigned long event, void *ptr)
 {
+	int rc;
 	char *cmd = ptr;
 	struct qcom_reboot_reason *reboot = container_of(this,
 		struct qcom_reboot_reason, reboot_nb);
@@ -100,17 +103,12 @@ static int qcom_reboot_reason_reboot(struct notifier_block *this,
 	}
 	for (reason = reasons; reason->cmd; reason++) {
 		if (!strcmp(cmd, reason->cmd)) {
-			/* BSP-Kernel@Xiaomi add for EIO mode */
-			if(!strcmp("dm-verity device corrupted",cmd)) {
-				pr_err("!!! trigger dm-verity panic !!!");
-				panic(cmd);
-			}
-			else {
-				nvmem_cell_write(reboot->nvmem_cell,
-				&reason->pon_reason,
-				sizeof(reason->pon_reason));
-			}
-			return NOTIFY_OK;
+			rc = nvmem_cell_write(reboot->nvmem_cell,
+					 &reason->pon_reason,
+					 sizeof(reason->pon_reason));
+			if (rc < 0)
+				pr_err("PON reason store failed, rc=%d\n", rc);
+			break;
 		}
 	}
 	nvmem_cell_write(reboot->nvmem_cell,

@@ -149,8 +149,13 @@ struct walt_rq {
 	u64			last_cc_update;
 	u64			cycles;
 	u64			util;
+	/* MVP */
 	struct list_head	mvp_tasks;
 	int                     num_mvp_tasks;
+	u64			mvp_arrival_time; /* ts when 1st mvp task selected on this cpu */
+	u64			mvp_throttle_time; /* ts when mvp were throttled */
+	bool			skip_mvp;
+
 	u64			latest_clock;
 	u32			enqueue_counter;
 };
@@ -630,8 +635,10 @@ static inline unsigned long capacity_of(int cpu)
 
 static inline bool __cpu_overutilized(int cpu, int delta)
 {
-	return (capacity_orig_of(cpu) * 1024) <
-		((cpu_util(cpu) + delta) * sched_capacity_margin_up[cpu]);
+	unsigned long cap = capacity_orig_of(cpu);
+
+	return cap ? ((cap * 1024) <
+			((cpu_util(cpu) + delta) * sched_capacity_margin_up[cpu])) : true;
 }
 
 static inline bool cpu_overutilized(int cpu)

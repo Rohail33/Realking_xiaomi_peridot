@@ -20,6 +20,7 @@
 #include <uapi/linux/hgsl.h>
 #include <linux/delay.h>
 #include <trace/events/gpu_mem.h>
+#include <linux/suspend.h>
 
 #include "hgsl.h"
 #include "hgsl_tcsr.h"
@@ -159,7 +160,6 @@ struct ctx_queue_header {
 	uint32_t unused0;
 	uint32_t unused1;
 };
-
 
 static inline bool _timestamp_retired(struct hgsl_context *ctxt,
 				unsigned int timestamp);
@@ -839,9 +839,9 @@ static int hgsl_init_global_db(struct qcom_hgsl *hgsl,
 
 	if (!is_sender && !hgsl->wq) {
 		hgsl->wq = alloc_workqueue("hgsl-wq", WQ_HIGHPRI, 0);
-		if (IS_ERR_OR_NULL(hgsl->wq)) {
+		if (!hgsl->wq) {
 			dev_err(dev, "failed to create workqueue\n");
-			ret = PTR_ERR(hgsl->wq);
+			ret = -ENOMEM;
 			goto fail;
 		}
 		INIT_WORK(&hgsl->ts_retire_work, ts_retire_worker);
@@ -878,8 +878,10 @@ static int hgsl_init_global_db(struct qcom_hgsl *hgsl,
 free_tcsr:
 	hgsl_tcsr_free(tcsr);
 destroy_wq:
-	if (hgsl->wq)
+	if (hgsl->wq) {
 		destroy_workqueue(hgsl->wq);
+		hgsl->wq = NULL;
+	}
 fail:
 	return ret;
 }
@@ -2383,8 +2385,8 @@ static int hgsl_ioctl_mem_alloc(struct file *filep, unsigned long arg)
 	}
 	mutex_lock(&priv->lock);
 	list_add(&mem_node->node, &priv->mem_allocated);
-	mutex_unlock(&priv->lock);
 	hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64);
+	mutex_unlock(&priv->lock);
 
 out:
 	if (ret && mem_node) {
@@ -2556,9 +2558,8 @@ static int hgsl_ioctl_mem_map_smmu(struct file *filep, unsigned long arg)
 		}
 		mutex_lock(&priv->lock);
 		list_add(&mem_node->node, &priv->mem_mapped);
-		mutex_unlock(&priv->lock);
-
 		hgsl_trace_gpu_mem_total(priv, mem_node->memdesc.size64);
+		mutex_unlock(&priv->lock);
 	}
 
 out:
@@ -3410,25 +3411,37 @@ out:
 
 static int hgsl_open(struct inode *inodep, struct file *filep)
 {
-	struct hgsl_priv *priv = hgsl_zalloc(sizeof(*priv));
+	struct hgsl_priv *priv = NULL;
 	struct qcom_hgsl  *hgsl = container_of(inodep->i_cdev,
 					       struct qcom_hgsl, cdev);
 	struct pid *pid = task_tgid(current);
 	struct task_struct *task = pid_task(pid, PIDTYPE_PID);
+	pid_t pid_nr;
 	int ret = 0;
 
-	if (!priv)
-		return -ENOMEM;
+	if (!task)
+		return -EINVAL;
 
-	if (!task) {
-		ret = -EINVAL;
+	pid_nr = task_pid_nr(task);
+
+	mutex_lock(&hgsl->mutex);
+	list_for_each_entry(priv, &hgsl->active_list, node) {
+		if (priv->pid == pid_nr) {
+			priv->open_count++;
+			goto out;
+		}
+	}
+
+	priv = hgsl_zalloc(sizeof(*priv));
+	if (!priv) {
+		ret = -ENOMEM;
 		goto out;
 	}
 
 	INIT_LIST_HEAD(&priv->mem_mapped);
 	INIT_LIST_HEAD(&priv->mem_allocated);
 	mutex_init(&priv->lock);
-	priv->pid = task_pid_nr(task);
+	priv->pid = pid_nr;
 
 	ret = hgsl_hyp_init(&priv->hyp_priv, hgsl->dev,
 		priv->pid, task->comm);
@@ -3436,13 +3449,17 @@ static int hgsl_open(struct inode *inodep, struct file *filep)
 		goto out;
 
 	priv->dev = hgsl;
-	filep->private_data = priv;
+	priv->open_count = 1;
 
+	list_add(&priv->node, &hgsl->active_list);
 	hgsl_sysfs_client_init(priv);
 	hgsl_debugfs_client_init(priv);
 out:
 	if (ret != 0)
 		kfree(priv);
+	else
+		filep->private_data = priv;
+	mutex_unlock(&hgsl->mutex);
 	return ret;
 }
 
@@ -3506,8 +3523,6 @@ static int _hgsl_release(struct hgsl_priv *priv)
 	struct qcom_hgsl *hgsl = priv->dev;
 	uint32_t i;
 	int ret;
-	hgsl_debugfs_client_release(priv);
-	hgsl_sysfs_client_release(priv);
 
 	read_lock(&hgsl->ctxt_lock);
 	for (i = 0; i < HGSL_CONTEXT_NUM; i++) {
@@ -3588,10 +3603,16 @@ static int hgsl_release(struct inode *inodep, struct file *filep)
 	struct qcom_hgsl *hgsl = priv->dev;
 
 	mutex_lock(&hgsl->mutex);
-	list_add(&priv->node, &hgsl->release_list);
+	if (priv->open_count < 1)
+		WARN_ON(1);
+	else if (--priv->open_count == 0) {
+		list_move(&priv->node, &hgsl->release_list);
+		hgsl_debugfs_client_release(priv);
+		hgsl_sysfs_client_release(priv);
+		queue_work(hgsl->release_wq, &hgsl->release_work);
+	}
 	mutex_unlock(&hgsl->mutex);
 
-	queue_work(hgsl->release_wq, &hgsl->release_work);
 	return 0;
 }
 
@@ -4262,6 +4283,43 @@ exit:
 	return ret;
 }
 
+static int hgsl_suspend(struct device *dev)
+{
+	/* Do nothing */
+	return 0;
+}
+
+static int hgsl_resume(struct device *dev)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct qcom_hgsl *hgsl = platform_get_drvdata(pdev);
+	struct hgsl_tcsr *tcsr = NULL;
+	int tcsr_idx = 0;
+
+	if (pm_suspend_target_state == PM_SUSPEND_MEM) {
+		for (tcsr_idx = 0; tcsr_idx < HGSL_TCSR_NUM; tcsr_idx++) {
+			tcsr = hgsl->tcsr[tcsr_idx][HGSL_TCSR_ROLE_RECEIVER];
+			if (tcsr != NULL) {
+				hgsl_tcsr_irq_enable(tcsr,
+					GLB_DB_DEST_TS_RETIRE_IRQ_MASK, true);
+			}
+		}
+		/*
+		 * There could be a scenario when GVM submit some work to GMU
+		 * just before going to suspend, in this case, the GMU will
+		 * not submit it to RB and when GMU resume(FW reload) happens,
+		 * it submits the work to GPU and fire the ts_retire to GVM.
+		 * At this point, the GVM is not up so it may miss the
+		 * interrupt from GMU so check if there is any ts_retire by
+		 * reading the shadow timestamp.
+		 */
+		if (hgsl->wq != NULL)
+			queue_work(hgsl->wq, &hgsl->ts_retire_work);
+	}
+
+	return 0;
+}
+
 static int qcom_hgsl_probe(struct platform_device *pdev)
 {
 	struct qcom_hgsl *hgsl_dev;
@@ -4287,6 +4345,8 @@ static int qcom_hgsl_probe(struct platform_device *pdev)
 									ret);
 		goto exit_dereg;
 	}
+
+	INIT_LIST_HEAD(&hgsl_dev->active_list);
 
 	ret = hgsl_init_release_wq(hgsl_dev);
 	if (ret < 0) {
@@ -4340,9 +4400,13 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 		if (tcsr_receiver) {
 			hgsl_tcsr_disable(tcsr_receiver);
 			hgsl_tcsr_free(tcsr_receiver);
-			flush_workqueue(hgsl->wq);
-			destroy_workqueue(hgsl->wq);
 		}
+	}
+
+	if (hgsl->wq) {
+		flush_workqueue(hgsl->wq);
+		destroy_workqueue(hgsl->wq);
+		hgsl->wq = NULL;
 	}
 
 	kfree(hgsl->contexts);
@@ -4358,6 +4422,11 @@ static int qcom_hgsl_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static const struct dev_pm_ops hgsl_pm_ops = {
+	.suspend         = hgsl_suspend,
+	.resume          = hgsl_resume,
+};
+
 static const struct of_device_id qcom_hgsl_of_match[] = {
 	{ .compatible = "qcom,hgsl" },
 	{}
@@ -4370,6 +4439,7 @@ static struct platform_driver qcom_hgsl_driver = {
 	.driver  = {
 		.name  = "qcom-hgsl",
 		.of_match_table = qcom_hgsl_of_match,
+		.pm = &hgsl_pm_ops,
 	},
 };
 

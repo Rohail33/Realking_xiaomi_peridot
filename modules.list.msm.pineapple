@@ -7,6 +7,7 @@ qcom_scmi_client.ko
 cmd-db.ko
 qcom_rpmh.ko
 qcom-pdc.ko
+nvmem_qfprom.ko
 thermal_minidump.ko
 qcom_tsens.ko
 qcom_iommu_util.ko
@@ -34,6 +35,9 @@ clk-rpmh.ko
 dcc_v2.ko
 debug_symbol.ko
 minidump.ko
+qcom_va_minidump.ko
+qcom_logbuf_vendor_hooks.ko
+qcom_logbuf_boot_log.ko
 memory_dump_v2.ko
 dispcc-pineapple.ko
 dispcc-volcano.ko

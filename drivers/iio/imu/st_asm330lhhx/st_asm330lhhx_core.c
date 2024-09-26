@@ -2314,11 +2314,118 @@ static int st_asm330lhhx_power_enable(struct st_asm330lhhx_hw *hw)
 	return 0;
 }
 
+static void st_asm330lhh_regulator_power_down(struct st_asm330lhhx_hw *hw)
+{
+	regulator_disable(hw->vdd);
+	regulator_set_voltage(hw->vdd, 0, INT_MAX);
+	regulator_set_load(hw->vdd, 0);
+	regulator_disable(hw->vio);
+	regulator_set_voltage(hw->vio, 0, INT_MAX);
+	regulator_set_load(hw->vio, 0);
+}
+
+static int st_asm330lhh_regulator_init(struct st_asm330lhhx_hw *hw)
+{
+	hw->vdd  = devm_regulator_get(hw->dev, "vdd");
+	if (IS_ERR(hw->vdd))
+		return dev_err_probe(hw->dev, PTR_ERR(hw->vdd), "Failed to get vdd");
+
+	hw->vio = devm_regulator_get(hw->dev, "vio");
+	if (IS_ERR(hw->vio))
+		return dev_err_probe(hw->dev, PTR_ERR(hw->vio), "Failed to get vio");
+
+	return 0;
+}
+
+static int st_asm330lhh_regulator_power_up(struct st_asm330lhhx_hw *hw)
+{
+	struct device_node *np;
+	u32 vdd_voltage[2];
+	u32 vio_voltage[2];
+	u32 vdd_current = 30000;
+	u32 vio_current = 30000;
+	int err = 0;
+
+	np = hw->dev->of_node;
+
+	if (of_property_read_u32(np, "vio-min-voltage", &vio_voltage[0]))
+		vio_voltage[0] = 1620000;
+
+	if (of_property_read_u32(np, "vio-max-voltage", &vio_voltage[1]))
+		vio_voltage[1] = 3600000;
+
+	if (of_property_read_u32(np, "vdd-min-voltage", &vdd_voltage[0]))
+		vdd_voltage[0] = 3000000;
+
+	if (of_property_read_u32(np, "vdd-max-voltage", &vdd_voltage[1]))
+		vdd_voltage[1] = 3600000;
+
+	/* Enable VDD for ASM330 */
+	if (vdd_voltage[0] > 0 && vdd_voltage[0] <= vdd_voltage[1]) {
+		err = regulator_set_voltage(hw->vdd, vdd_voltage[0],
+						vdd_voltage[1]);
+		if (err) {
+			pr_err("Error %d during vdd set_voltage\n", err);
+			return err;
+		}
+	}
+
+	err = regulator_set_load(hw->vdd, vdd_current);
+	if (err < 0) {
+		pr_err("vdd regulator_set_load failed,err=%d\n", err);
+		goto remove_vdd_voltage;
+	}
+
+	err = regulator_enable(hw->vdd);
+	if (err) {
+		dev_err(hw->dev, "vdd enable failed with error %d\n", err);
+		goto remove_vdd_current;
+	}
+
+	/* Enable VIO for ASM330 */
+	if (vio_voltage[0] > 0 && vio_voltage[0] <= vio_voltage[1]) {
+		err = regulator_set_voltage(hw->vio, vio_voltage[0],
+						vio_voltage[1]);
+		if (err) {
+			pr_err("Error %d during vio set_voltage\n", err);
+			goto disable_vdd;
+		}
+	}
+
+	err = regulator_set_load(hw->vio, vio_current);
+	if (err < 0) {
+		pr_err("vio regulator_set_load failed,err=%d\n", err);
+		goto remove_vio_voltage;
+	}
+
+	err = regulator_enable(hw->vio);
+	if (err) {
+		dev_err(hw->dev, "vio enable failed with error %d\n", err);
+		goto remove_vio_current;
+	}
+
+	return 0;
+
+remove_vio_current:
+	regulator_set_load(hw->vio, 0);
+remove_vio_voltage:
+	regulator_set_voltage(hw->vio, 0, INT_MAX);
+disable_vdd:
+	regulator_disable(hw->vdd);
+remove_vdd_current:
+	regulator_set_load(hw->vdd, 0);
+remove_vdd_voltage:
+	regulator_set_voltage(hw->vdd, 0, INT_MAX);
+
+	return err;
+}
+
 int st_asm330lhhx_probe(struct device *dev, int irq, int hw_id,
 			struct regmap *regmap)
 {
 	struct st_asm330lhhx_hw *hw;
-	int i, err;
+	struct device_node *np;
+	int i = 0, err = 0;
 
 	hw = devm_kzalloc(dev, sizeof(*hw), GFP_KERNEL);
 	if (!hw)
@@ -2335,6 +2442,23 @@ int st_asm330lhhx_probe(struct device *dev, int irq, int hw_id,
 	hw->irq = irq;
 	hw->odr_table_entry = st_asm330lhhx_odr_table;
 	hw->hw_timestamp_global = 0;
+
+	np = hw->dev->of_node;
+	/* use qtimer if property is enabled */
+	err = st_asm330lhh_regulator_init(hw);
+	if (err < 0) {
+		dev_err(hw->dev, "regulator init failed\n");
+		return err;
+	}
+
+	err = st_asm330lhh_regulator_power_up(hw);
+	if (err < 0) {
+		dev_err(hw->dev, "regulator power up failed\n");
+		return err;
+	}
+
+	/* allow time for enabling regulators */
+	usleep_range(1000, 2000);
 
 	err = st_asm330lhhx_power_enable(hw);
 	if (err != 0)
@@ -2514,8 +2638,104 @@ static int __maybe_unused st_asm330lhhx_resume(struct device *dev)
 	return err < 0 ? err : 0;
 }
 
+static int __maybe_unused st_asm330lhhx_freeze(struct device *dev)
+{
+	struct st_asm330lhhx_hw *hw = dev_get_drvdata(dev);
+	struct st_asm330lhhx_sensor *sensor;
+	int i, err = 0;
+
+	dev_info(dev, "Freeze device\n");
+
+	disable_hardirq(hw->irq);
+
+	for (i = 0; i < ST_ASM330LHHX_ID_MAX; i++) {
+		if (!hw->iio_devs[i])
+			continue;
+
+		sensor = iio_priv(hw->iio_devs[i]);
+		if (!(hw->enable_mask & BIT_ULL(sensor->id)))
+			continue;
+
+		/* power off enabled sensors */
+		err = st_asm330lhhx_set_odr(sensor, 0, 0);
+		if (err < 0)
+			return err;
+	}
+
+	if (st_asm330lhhx_is_fifo_enabled(hw)) {
+		err = st_asm330lhhx_suspend_fifo(hw);
+		if (err < 0)
+			return err;
+	}
+
+	err = st_asm330lhhx_bk_regs(hw);
+
+#ifdef CONFIG_IIO_ST_ASM330LHHX_MAY_WAKEUP
+	if (device_may_wakeup(dev))
+		enable_irq_wake(hw->irq);
+#endif /* CONFIG_IIO_ST_ASM330LHHX_MAY_WAKEUP */
+
+
+	st_asm330lhh_regulator_power_down(hw);
+
+	return err < 0 ? err : 0;
+}
+
+static int __maybe_unused st_asm330lhhx_restore(struct device *dev)
+{
+	struct st_asm330lhhx_hw *hw = dev_get_drvdata(dev);
+	struct st_asm330lhhx_sensor *sensor;
+	int i, err = 0;
+
+	dev_info(dev, "Restore device\n");
+	err = st_asm330lhh_regulator_power_up(hw);
+	if (err < 0) {
+		dev_err(hw->dev, "regulator power up failed\n");
+		return err;
+	}
+
+	/* allow time for enabling regulators */
+	usleep_range(1000, 2000);
+
+#ifdef CONFIG_IIO_ST_ASM330LHHX_MAY_WAKEUP
+	if (device_may_wakeup(dev))
+		disable_irq_wake(hw->irq);
+#endif /* CONFIG_IIO_ST_ASM330LHHX_MAY_WAKEUP */
+	err = st_asm330lhhx_restore_regs(hw);
+	if (err < 0)
+		return err;
+
+	for (i = 0; i < ST_ASM330LHHX_ID_MAX; i++) {
+		if (!hw->iio_devs[i])
+			continue;
+
+		sensor = iio_priv(hw->iio_devs[i]);
+		if (!(hw->enable_mask & BIT_ULL(sensor->id)))
+			continue;
+
+		err = st_asm330lhhx_set_odr(sensor, sensor->odr, sensor->uodr);
+		if (err < 0)
+			return err;
+	}
+
+	err = st_asm330lhhx_reset_hwts(hw);
+	if (err < 0)
+		return err;
+
+	if (st_asm330lhhx_is_fifo_enabled(hw))
+		err = st_asm330lhhx_set_fifo_mode(hw, ST_ASM330LHHX_FIFO_CONT);
+
+	enable_irq(hw->irq);
+
+	return err < 0 ? err : 0;
+}
+
+
 const struct dev_pm_ops st_asm330lhhx_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(st_asm330lhhx_suspend, st_asm330lhhx_resume)
+	.suspend = st_asm330lhhx_suspend,
+	.resume  = st_asm330lhhx_resume,
+	.freeze  = st_asm330lhhx_freeze,
+	.restore = st_asm330lhhx_restore,
 };
 EXPORT_SYMBOL(st_asm330lhhx_pm_ops);
 

@@ -32,7 +32,7 @@ load(":dpm_image.bzl", "define_dpm_image")
 load(":image_opts.bzl", "boot_image_opts")
 load(":target_variants.bzl", "la_variants")
 load(":modules.bzl", "COMMON_GKI_MODULES_LIST")
-load(":merge_list_files.bzl", "merge_list_files")
+load(":modules_unprotected.bzl", "get_unprotected_vendor_modules_list")
 
 def _define_build_config(
         msm_target,
@@ -50,6 +50,11 @@ def _define_build_config(
       msm_arch: architecture of target platform (e.g. "pineapple")
       variant: variant of kernel to build (e.g. "gki")
     """
+
+    # keep earlycon addr in earlycon cmdline param only when provided explicitly in target's bazel file
+    # otherwise, rely on stdout-path
+    earlycon_param = "={}".format(boot_image_opts.earlycon_addr) if boot_image_opts.earlycon_addr != None else ""
+    earlycon_param = '[ "$KERNEL_CMDLINE_CONSOLE_AUTO" != "0" ] && KERNEL_VENDOR_CMDLINE+=\' earlycon{} \''.format(earlycon_param)
 
     write_file(
         name = "{}_build_config_bazel".format(target),
@@ -71,7 +76,7 @@ def _define_build_config(
             "BUILD_INIT_BOOT_IMG=1",
             "LZ4_RAMDISK={}".format(int(boot_image_opts.lz4_ramdisk)),
             '[ -z "$DT_OVERLAY_SUPPORT" ] && DT_OVERLAY_SUPPORT=1',
-            '[ "$KERNEL_CMDLINE_CONSOLE_AUTO" != "0" ] && KERNEL_VENDOR_CMDLINE+=\' earlycon={} \''.format(boot_image_opts.earlycon_addr),
+            earlycon_param,
             "KERNEL_VENDOR_CMDLINE+=' {} '".format(" ".join(boot_image_opts.kernel_vendor_cmdline_extras)),
             "VENDOR_BOOTCONFIG+='androidboot.first_stage_console=1 androidboot.hardware=qcom_kp'",
             "",  # Needed for newline at end of file
@@ -115,6 +120,7 @@ def _define_build_config(
 
 def _define_kernel_build(
         target,
+        msm_target,
         base_kernel,
         in_tree_module_list,
         dtb_list,
@@ -142,10 +148,14 @@ def _define_kernel_build(
     if dtbo_list:
         out_list += dtbo_list
 
+    common_gki_mod_list = [] + COMMON_GKI_MODULES_LIST
+    for mod in get_unprotected_vendor_modules_list(msm_target):
+        common_gki_mod_list.remove(mod)
+
     kernel_build(
         name = target,
         module_outs = in_tree_module_list,
-        module_implicit_outs = COMMON_GKI_MODULES_LIST,
+        module_implicit_outs = common_gki_mod_list,
         outs = out_list,
         build_config = ":{}_build_config".format(target),
         dtstree = dtstree,
@@ -378,6 +388,10 @@ def _define_kernel_dist(
         ":{}_system_dlkm_module_blocklist".format(target),
     ])
 
+    vendor_unprotected_dlkm = " ".join(get_unprotected_vendor_modules_list(msm_target))
+    if vendor_unprotected_dlkm:
+        msm_dist_targets.extend(["{}_vendor_dlkm_module_unprotectedlist".format(target)])
+
     msm_dist_targets.append("{}_avb_sign_boot_image".format(target))
 
     if dpm_overlay:
@@ -486,10 +500,21 @@ def define_msm_la(
     vendor_ramdisk_binaries = get_vendor_ramdisk_binaries(target)
     gki_ramdisk_prebuilt_binary = get_gki_ramdisk_prebuilt_binary()
     build_config_fragments = get_build_config_fragments(msm_target)
+    vendor_dlkm_module_unprotected_list = get_unprotected_vendor_modules_list(msm_target)
 
     # Can't enable dpm_overlay if no overlays are listed
     if len(dtbo_list) == 0 and dpm_overlay:
         dpm_overlay = False
+
+    vendor_unprotected_dlkm = " ".join(vendor_dlkm_module_unprotected_list)
+    if vendor_unprotected_dlkm:
+        write_file(
+            name = "{}_vendor_dlkm_module_unprotectedlist".format(target),
+            out = "{}/vendor_dlkm.modules.unprotectedlist".format(target),
+            content = [vendor_unprotected_dlkm, ""],
+        )
+
+    in_tree_module_list += vendor_dlkm_module_unprotected_list
 
     _define_build_config(
         msm_target,
@@ -502,6 +527,7 @@ def define_msm_la(
 
     _define_kernel_build(
         target,
+        msm_target,
         base_kernel,
         in_tree_module_list,
         dtb_list,

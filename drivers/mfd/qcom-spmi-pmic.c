@@ -310,8 +310,6 @@ static void pmic_spmi_remove(struct spmi_device *sdev)
 
 MODULE_DEVICE_TABLE(of, pmic_spmi_id_table);
 
-static void pmic_spmi_remove(struct spmi_device *sdev) {}
-
 static struct spmi_driver pmic_spmi_driver = {
 	.probe = pmic_spmi_probe,
 	.remove = pmic_spmi_remove,

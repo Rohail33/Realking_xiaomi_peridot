@@ -22,6 +22,8 @@ target_arch_map = {
 
 la_targets = [
     # keep sorted
+    "anorak",
+    "autoghgvm",
     "autogvm",
     "autoghgvm",
     "shennong",
@@ -32,10 +34,12 @@ la_targets = [
     "chenfeng",
     "blair",
     "gen3auto",
+    "neo-la",
     "niobe",
     "pineapple",
     "pitti",
     "sdmsteppeauto",
+    "seraph",
 ]
 
 la_variants = [
@@ -72,11 +76,16 @@ vm_types = [
     "oemvm",
 ]
 
-vm_target_bases = [
-    "pineapple",
+niobe_vm_types = [
+    "tuivm",
 ]
 
-vm_targets = ["{}-{}".format(t, vt) for t in vm_target_bases for vt in vm_types]
+vm_target_bases = {
+    "pineapple": vm_types,
+    "niobe": niobe_vm_types,
+}
+
+vm_targets = ["{}-{}".format(t, vt) for t in vm_target_bases.keys() for vt in vm_target_bases[t]]
 
 vm_variants = [
     # keep sorted

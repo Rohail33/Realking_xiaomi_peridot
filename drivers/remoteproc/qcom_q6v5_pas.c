@@ -47,6 +47,7 @@
 #define PIL_TZ_PEAK_BW	UINT_MAX
 
 #define ADSP_DECRYPT_SHUTDOWN_DELAY_MS	100
+#define RPROC_HANDOVER_POLL_DELAY_MS	1
 
 static struct icc_path *scm_perf_client;
 static int scm_pas_bw_count;
@@ -60,6 +61,7 @@ static bool recovery_set_cb;
 #define SOCCP_SLEEP_US  100
 #define SOCCP_TIMEOUT_US  10000
 #define SOCCP_STATE_MASK 0x600
+#define SPARE_REG_SOCCP_D0  0x1
 #define SOCCP_D0  0x2
 #define SOCCP_D1  0x4
 #define SOCCP_D3  0x8
@@ -88,6 +90,7 @@ struct adsp_data {
 	const char *sysmon_name;
 	const char *qmp_name;
 	int ssctl_id;
+	unsigned int smem_host_id;
 	bool check_status;
 };
 
@@ -124,6 +127,7 @@ struct qcom_adsp {
 	bool retry_shutdown;
 	struct icc_path *bus_client;
 	int crash_reason_smem;
+	unsigned int smem_host_id;
 	bool has_aggre2_clk;
 	bool dma_phys_below_32b;
 	bool decrypt_shutdown;
@@ -161,7 +165,8 @@ struct qcom_adsp {
 	unsigned int wake_bit;
 	unsigned int sleep_bit;
 	int current_users;
-	void *config_addr;
+	void *tcsr_addr;
+	void *spare_reg_addr;
 	bool check_status;
 };
 
@@ -674,6 +679,9 @@ static int adsp_start(struct rproc *rproc)
 
 	trace_rproc_qcom_event(dev_name(adsp->dev), "adsp_start", "enter");
 
+	if (adsp->check_status)
+		adsp->current_users = 0;
+
 	qcom_q6v5_prepare(&adsp->q6v5);
 
 	if (is_mss_ssr_hyp_assign_en(adsp)) {
@@ -719,8 +727,8 @@ static int adsp_start(struct rproc *rproc)
 	if (adsp->dtb_pas_id || adsp->dtb_fw_name) {
 		ret = qcom_scm_pas_auth_and_reset(adsp->dtb_pas_id);
 		if (ret)
-			panic("Panicking, auth and reset failed for remoteproc %s dtb\n",
-				 rproc->name);
+			panic("Panicking, auth and reset failed for remoteproc %s dtb ret=%d\n",
+				rproc->name, ret);
 	}
 
 	trace_rproc_qcom_event(dev_name(adsp->dev), "Q6_firmware_loading", "enter");
@@ -741,7 +749,8 @@ static int adsp_start(struct rproc *rproc)
 
 	ret = qcom_scm_pas_auth_and_reset(adsp->pas_id);
 	if (ret)
-		panic("Panicking, auth and reset failed for remoteproc %s\n", rproc->name);
+		panic("Panicking, auth and reset failed for remoteproc %s ret=%d\n",
+				rproc->name, ret);
 	trace_rproc_qcom_event(dev_name(adsp->dev), "Q6_auth_reset", "exit");
 
 	/* if needed, signal Q6 to continute booting */
@@ -811,19 +820,33 @@ exit:
  * rproc_config_check() - Check back the config register
  * @state: new state of the rproc
  *
- * Call this function after there has been a request to change of
- * state of rproc. This function takes in the new state to which the
- * rproc has transitioned, and poll the WFI status register to check
- * if the state request change has been accepted successfully by the
- * rproc. The poll is timed out after 10 milliseconds.
+ * Polled read on a register till with a 5ms timeout and 100-200Us interval.
+ * Returns immediately if the expected value is read back from the addr.
  *
- * Return: 0 if the WFI status register reflects the requested state.
+ * state: new state of the rproc
+ *
+ * addr: Address to poll on
+ *
+ * return: 0 if the expected value is read back from the address
+ * -ETIMEDOUT is the value was not read in 5ms
  */
-static int rproc_config_check(struct qcom_adsp *adsp, u32 state)
+static int rproc_config_check(struct qcom_adsp *adsp, u32 state, void *addr)
+{
+	unsigned int retry_num = 50;
+	u32 val;
+
+	do {
+		usleep_range(SOCCP_SLEEP_US, SOCCP_SLEEP_US + 100);
+		val = readl(addr);
+	} while (!(val & state) && --retry_num);
+
+	return (val & state) ? 0 : -ETIMEDOUT;
+}
+static int rproc_config_check_atomic(struct qcom_adsp *adsp, u32 state, void *addr)
 {
 	u32 val;
 
-	return readx_poll_timeout(readl, adsp->config_addr, val,
+	return readx_poll_timeout_atomic(readl, addr, val,
 				val == state, SOCCP_SLEEP_US, SOCCP_TIMEOUT_US);
 }
 
@@ -839,33 +862,62 @@ static int rproc_find_status_register(struct qcom_adsp *adsp)
 {
 	struct device_node *tcsr;
 	struct device_node *np = adsp->dev->of_node;
-	u32 offset;
+	struct resource res;
+	u32 offset, addr;
 	int ret;
 	void *tcsr_base;
 
-	tcsr = of_parse_phandle(np, "soccp-config", 0);
+	tcsr = of_parse_phandle(np, "soccp-tcsr", 0);
 	if (!tcsr) {
 		dev_err(adsp->dev, "Unable to find the soccp config register\n");
 		return -EINVAL;
 	}
 
-	tcsr_base = of_iomap(tcsr, 0);
+	ret = of_address_to_resource(tcsr, 0, &res);
 	of_node_put(tcsr);
+	if (ret) {
+		dev_err(adsp->dev, "Unable to find the tcsr base addr\n");
+		return ret;
+	}
+
+	tcsr_base = ioremap_wc(res.start, resource_size(&res));
 	if (!tcsr_base) {
 		dev_err(adsp->dev, "Unable to find the tcsr base addr\n");
 		return -ENOMEM;
 	}
 
-	ret = of_property_read_u32_index(np, "soccp-config", 1, &offset);
+	ret = of_property_read_u32_index(np, "soccp-tcsr", 1, &offset);
 	if (ret < 0) {
-		dev_err(adsp->dev, "Unable to find the tcsr offset addr\n");
+		dev_err(adsp->dev, "Unable to find the tcsr config offset addr\n");
 		iounmap(tcsr_base);
 		return ret;
 	}
+	adsp->tcsr_addr = tcsr_base + offset;
 
-	adsp->config_addr = tcsr_base + offset;
+	ret = of_property_read_u32(np, "soccp-spare", &addr);
+	if (!addr) {
+		dev_err(adsp->dev, "Unable to find the running config register\n");
+		return -EINVAL;
+	}
+
+	adsp->spare_reg_addr = ioremap_wc(addr, 4);
+	if (!adsp->spare_reg_addr) {
+		dev_err(adsp->dev, "Unable to find the tcsr base addr\n");
+		return -ENOMEM;
+	}
 
 	return 0;
+}
+
+static bool rproc_poll_handover(struct qcom_adsp *adsp)
+{
+	unsigned int retry_num = 50;
+
+	do {
+		msleep(RPROC_HANDOVER_POLL_DELAY_MS);
+	} while (!adsp->q6v5.handover_issued && --retry_num);
+
+	return adsp->q6v5.handover_issued;
 }
 
 /**
@@ -882,15 +934,23 @@ int rproc_set_state(struct rproc *rproc, bool state)
 {
 	int ret = 0;
 	int users;
-	struct qcom_adsp *adsp = (struct qcom_adsp *)rproc->priv;
+	struct qcom_adsp *adsp;
 
-	if (!rproc || !adsp) {
+	if (!rproc || !rproc->priv) {
 		pr_err("no rproc or adsp\n");
 		return -EINVAL;
 	}
-	if (rproc->state != RPROC_RUNNING) {
+
+	adsp = (struct qcom_adsp *)rproc->priv;
+	if (!adsp->q6v5.running) {
 		dev_err(adsp->dev, "rproc is not running\n");
 		return -EINVAL;
+	} else if (!adsp->q6v5.handover_issued) {
+		dev_err(adsp->dev, "rproc is running but handover is not received\n");
+		if (!rproc_poll_handover(adsp)) {
+			dev_err(adsp->dev, "retry for handover timedout\n");
+			return -EINVAL;
+		}
 	}
 
 	mutex_lock(&adsp->adsp_lock);
@@ -908,6 +968,12 @@ int rproc_set_state(struct rproc *rproc, bool state)
 			goto soccp_out;
 		}
 
+		ret = do_bus_scaling(adsp, true);
+		if (ret) {
+			dev_err(adsp->q6v5.dev, "failed to set bandwidth request\n");
+			goto soccp_out;
+		}
+
 		ret = clk_prepare_enable(adsp->xo);
 		if (ret) {
 			dev_err(adsp->dev, "failed to enable clks\n");
@@ -922,9 +988,23 @@ int rproc_set_state(struct rproc *rproc, bool state)
 			goto soccp_out;
 		}
 
-		ret = rproc_config_check(adsp, SOCCP_D0);
+		ret = rproc_config_check(adsp, SOCCP_D0 | SOCCP_D1, adsp->tcsr_addr);
 		if (ret) {
-			dev_err(adsp->dev, "failed to change from D3 to D0\n");
+			dev_err(adsp->dev, "%s requested D3->D0: soccp failed to update tcsr val=%d\n",
+				current->comm, readl(adsp->tcsr_addr));
+			goto soccp_out;
+		}
+
+		ret = rproc_config_check(adsp, SPARE_REG_SOCCP_D0, adsp->spare_reg_addr);
+		if (ret) {
+			ret = qcom_smem_state_update_bits(adsp->wake_state,
+						    SOCCP_STATE_MASK,
+						    !BIT(adsp->wake_bit));
+			if (ret)
+				dev_err(adsp->dev, "failed to clear smem bits after a failed D0 request\n");
+
+			dev_err(adsp->dev, "%s requested D3->D0: soccp failed to update spare reg val=%d\n",
+				current->comm, readl(adsp->spare_reg_addr));
 			goto soccp_out;
 		}
 
@@ -943,21 +1023,40 @@ int rproc_set_state(struct rproc *rproc, bool state)
 				goto soccp_out;
 			}
 
-			ret = rproc_config_check(adsp, SOCCP_D3);
+			ret = rproc_config_check(adsp, SOCCP_D3, adsp->tcsr_addr);
 			if (ret) {
-				dev_err(adsp->dev, "failed to change from D0 to D3\n");
+				ret = qcom_smem_state_update_bits(adsp->sleep_state,
+						    SOCCP_STATE_MASK,
+						    !BIT(adsp->sleep_bit));
+				if (ret)
+					dev_err(adsp->dev, "failed to clear smem bits after a failed D3 request\n");
+
+				dev_err(adsp->dev, "%s requested D0->D3 failed: TCSR value:%d\n",
+					current->comm, readl(adsp->tcsr_addr));
 				goto soccp_out;
 			}
 			disable_regulators(adsp);
 			clk_disable_unprepare(adsp->xo);
+			ret = do_bus_scaling(adsp, false);
+			if (ret < 0) {
+				dev_err(adsp->q6v5.dev, "failed to set bandwidth request\n");
+				goto soccp_out;
+			}
+
 			adsp->current_users = 0;
 		}
 	}
 
 soccp_out:
+	if (ret && (adsp->rproc->state != RPROC_RUNNING)) {
+		dev_err(adsp->dev, "SOCCP has crashed while processing a D transition req by %s\n",
+			current->comm);
+		ret = -EBUSY;
+	}
+
 	mutex_unlock(&adsp->adsp_lock);
 
-	return ret ? -ETIMEDOUT : 0;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(rproc_set_state);
 
@@ -978,7 +1077,11 @@ static int rproc_panic_handler(struct notifier_block *this,
 		dev_err(adsp->dev, "failed to update smem bits for D3 to D0\n");
 		goto done;
 	}
-	ret = rproc_config_check(adsp, SOCCP_D0);
+	ret = rproc_config_check_atomic(adsp, SOCCP_D0, adsp->tcsr_addr);
+	if (ret)
+		dev_err(adsp->dev, "failed to change to D0\n");
+
+	ret = rproc_config_check_atomic(adsp, SPARE_REG_SOCCP_D0, adsp->spare_reg_addr);
 	if (ret)
 		dev_err(adsp->dev, "failed to change to D0\n");
 done:
@@ -991,11 +1094,13 @@ static void qcom_pas_handover(struct qcom_q6v5 *q6v5)
 	int ret;
 
 	if (adsp->check_status) {
-		ret = rproc_config_check(adsp, SOCCP_D3);
+		ret = rproc_config_check(adsp, SOCCP_D3, adsp->tcsr_addr);
 		if (ret)
-			dev_err(adsp->dev, "state not changed in handover\n");
+			dev_err(adsp->dev, "state not changed in handover TCSR val = %d\n",
+				readl(adsp->tcsr_addr));
 		else
-			dev_info(adsp->dev, "state changed in handover for soccp!\n");
+			dev_info(adsp->dev, "state changed in handover for soccp! TCSR val = %d\n",
+					readl(adsp->tcsr_addr));
 	}
 	disable_regulators(adsp);
 	clk_disable_unprepare(adsp->aggre2_clk);
@@ -1041,6 +1146,9 @@ static int adsp_stop(struct rproc *rproc)
 	handover = qcom_q6v5_unprepare(&adsp->q6v5);
 	if (handover)
 		qcom_pas_handover(&adsp->q6v5);
+
+	if (adsp->smem_host_id)
+		ret = qcom_smem_bust_hwspin_lock_by_host(adsp->smem_host_id);
 
 	if (is_mss_ssr_hyp_assign_en(adsp)) {
 		add_mpss_dsm_mem_ssr_dump(adsp);
@@ -1557,6 +1665,7 @@ static int adsp_probe(struct platform_device *pdev)
 		goto free_rproc;
 	adsp->has_aggre2_clk = desc->has_aggre2_clk;
 	adsp->info_name = desc->sysmon_name;
+	adsp->smem_host_id = desc->smem_host_id;
 	adsp->decrypt_shutdown = desc->decrypt_shutdown;
 	adsp->qmp_name = desc->qmp_name;
 	adsp->dma_phys_below_32b = desc->dma_phys_below_32b;
@@ -1649,10 +1758,6 @@ static int adsp_probe(struct platform_device *pdev)
 		mutex_init(&adsp->adsp_lock);
 
 		adsp->current_users = 0;
-
-		adsp->panic_blk.priority = INT_MAX - 1;
-		adsp->panic_blk.notifier_call = rproc_panic_handler;
-		atomic_notifier_chain_register(&panic_notifier_list, &adsp->panic_blk);
 	}
 
 	qcom_q6v5_register_ssr_subdev(&adsp->q6v5, &adsp->ssr_subdev.subdev);
@@ -1699,6 +1804,12 @@ static int adsp_probe(struct platform_device *pdev)
 	}
 	mutex_unlock(&q6v5_pas_mutex);
 
+	if (adsp->check_status) {
+		adsp->panic_blk.priority = INT_MAX - 2;
+		adsp->panic_blk.notifier_call = rproc_panic_handler;
+		atomic_notifier_chain_register(&panic_notifier_list, &adsp->panic_blk);
+	}
+
 	return 0;
 
 remove_rproc:
@@ -1741,6 +1852,8 @@ static int adsp_remove(struct platform_device *pdev)
 	qcom_remove_sysmon_subdev(adsp->sysmon);
 	qcom_remove_smd_subdev(adsp->rproc, &adsp->smd_subdev);
 	qcom_remove_ssr_subdev(adsp->rproc, &adsp->ssr_subdev);
+	if (adsp->check_status)
+		atomic_notifier_chain_unregister(&panic_notifier_list, &adsp->panic_blk);
 	adsp_pds_detach(adsp, adsp->proxy_pds, adsp->proxy_pd_count);
 	device_init_wakeup(adsp->dev, false);
 	rproc_free(adsp->rproc);
@@ -1901,6 +2014,7 @@ static const struct adsp_data niobe_adsp_resource = {
 	.sysmon_name = "adsp",
 	.qmp_name = "adsp",
 	.ssctl_id = 0x14,
+	.smem_host_id = 2,
 };
 
 static const struct adsp_data cliffs_adsp_resource = {
@@ -2159,6 +2273,7 @@ static const struct adsp_data niobe_cdsp_resource = {
 	.sysmon_name = "cdsp",
 	.qmp_name = "cdsp",
 	.ssctl_id = 0x17,
+	.smem_host_id = 5,
 };
 
 static const struct adsp_data cliffs_cdsp_resource = {
@@ -2188,6 +2303,35 @@ static const struct adsp_data volcano_cdsp_resource = {
 	.uses_elf64 = true,
 	.has_aggre2_clk = false,
 	.auto_boot = false,
+	.ssr_name = "cdsp",
+	.sysmon_name = "cdsp",
+	.qmp_name = "cdsp",
+	.ssctl_id = 0x17,
+};
+
+static const struct adsp_data anorak_adsp_resource = {
+	.crash_reason_smem = 423,
+	.firmware_name = "adsp.mdt",
+	.pas_id = 1,
+	.minidump_id = 5,
+	.uses_elf64 = true,
+	.has_aggre2_clk = false,
+	.auto_boot = false,
+	.ssr_name = "lpass",
+	.sysmon_name = "adsp",
+	.qmp_name = "adsp",
+	.ssctl_id = 0x14,
+};
+
+static const struct adsp_data anorak_cdsp_resource = {
+	.crash_reason_smem = 601,
+	.firmware_name = "cdsp.mdt",
+	.pas_id = 18,
+	.minidump_id = 7,
+	.uses_elf64 = true,
+	.has_aggre2_clk = false,
+	.auto_boot = false,
+	.hyp_assign_mem = true,
 	.ssr_name = "cdsp",
 	.sysmon_name = "cdsp",
 	.qmp_name = "cdsp",
@@ -2341,6 +2485,7 @@ static const struct adsp_data volcano_mpss_resource = {
 	.qmp_name = "modem",
 	.ssctl_id = 0x12,
 	.dma_phys_below_32b = true,
+	.both_dumps = true,
 };
 
 static const struct adsp_data cinder_mpss_resource = {
@@ -2611,7 +2756,7 @@ static const struct adsp_data monaco_auto_cdsp_resource = {
 	.sysmon_name = "cdsp",
 	.qmp_name = "cdsp",
 	.ssctl_id = 0x17,
-	.minidump_id = 19,
+	.minidump_id = 7,
 };
 
 static const struct adsp_data niobe_soccp_resource = {
@@ -2621,6 +2766,7 @@ static const struct adsp_data niobe_soccp_resource = {
 	.ssr_name = "soccp",
 	.sysmon_name = "soccp",
 	.check_status = true,
+	.auto_boot = true,
 };
 
 static const struct adsp_data monaco_auto_gpdsp_resource = {
@@ -2746,6 +2892,8 @@ static const struct of_device_id adsp_of_match[] = {
 	{ .compatible = "qcom,volcano-adsp-pas", .data = &volcano_adsp_resource},
 	{ .compatible = "qcom,volcano-modem-pas", .data = &volcano_mpss_resource},
 	{ .compatible = "qcom,volcano-cdsp-pas", .data = &volcano_cdsp_resource},
+	{ .compatible = "qcom,anorak-adsp-pas", .data = &anorak_adsp_resource},
+	{ .compatible = "qcom,anorak-cdsp-pas", .data = &anorak_cdsp_resource},
 	{ },
 };
 MODULE_DEVICE_TABLE(of, adsp_of_match);
