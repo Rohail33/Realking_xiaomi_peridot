@@ -95,9 +95,9 @@
   bit_wait
   bit_wait_timeout
   __blk_alloc_disk
-  blkdev_get_by_dev
   blk_crypto_keyslot_index
   blk_crypto_register
+  blkdev_get_by_dev
   blk_execute_rq
   blk_execute_rq_nowait
   __blk_mq_alloc_disk
@@ -345,12 +345,12 @@
   contig_page_data
   _copy_from_iter
   copy_from_kernel_nofault
-  copy_page
   __copy_overflow
   copy_page
   _copy_to_iter
   __cpu_active_mask
   cpu_bit_bitmap
+  cpu_busy_with_softirqs
   __cpu_dying_mask
   cpufreq_cpu_get
   cpufreq_cpu_get_raw
@@ -651,6 +651,7 @@
   devm_platform_ioremap_resource_byname
   devm_power_supply_register
   devm_pwm_get
+  devm_qcom_smem_state_get
   devm_regmap_add_irq_chip
   devm_regmap_del_irq_chip
   devm_regmap_field_alloc
@@ -674,6 +675,7 @@
   __devm_rtc_register_device
   devm_snd_soc_register_card
   devm_snd_soc_register_component
+  devm_tegra_memory_controller_get
   devm_thermal_of_cooling_device_register
   devm_thermal_of_zone_register
   devm_usb_get_phy_by_node
@@ -742,22 +744,6 @@
   divider_recalc_rate
   divider_ro_round_rate_parent
   divider_round_rate_parent
-  dm_bufio_client_create
-  dm_bufio_client_destroy
-  dm_bufio_mark_buffer_dirty
-  dm_bufio_new
-  dm_bufio_read
-  dm_bufio_release
-  dm_bufio_write_dirty_buffers
-  dm_disk
-  dm_get_device
-  dm_kobject_release
-  dm_read_arg_group
-  dm_register_target
-  dm_shift_arg
-  dm_table_get_md
-  dm_table_get_mode
-  dm_unregister_target
   dma_alloc_attrs
   dma_alloc_noncontiguous
   dma_alloc_pages
@@ -835,6 +821,22 @@
   dma_unmap_sg_attrs
   dma_vmap_noncontiguous
   dma_vunmap_noncontiguous
+  dm_bufio_client_create
+  dm_bufio_client_destroy
+  dm_bufio_mark_buffer_dirty
+  dm_bufio_new
+  dm_bufio_read
+  dm_bufio_release
+  dm_bufio_write_dirty_buffers
+  dm_disk
+  dm_get_device
+  dm_kobject_release
+  dm_read_arg_group
+  dm_register_target
+  dm_shift_arg
+  dm_table_get_md
+  dm_table_get_mode
+  dm_unregister_target
   do_trace_netlink_extack
   do_trace_rcu_torture_read
   double_rq_lock
@@ -1089,6 +1091,7 @@
   edac_device_free_ctl_info
   edac_device_handle_ce_count
   edac_device_handle_ue_count
+  efi
   enable_irq
   enable_percpu_irq
   eth_commit_mac_addr_change
@@ -1253,8 +1256,8 @@
   get_option
   get_page_owner_handle
   get_pfnblock_flags_mask
-  get_pid_task
   get_phy_device
+  get_pid_task
   get_random_bytes
   get_random_u16
   get_random_u32
@@ -1498,6 +1501,7 @@
   ieee802154_xmit_hw_error
   iio_buffer_init
   iio_buffer_put
+  iio_channel_get
   iio_device_attach_buffer
   iio_device_claim_direct_mode
   iio_device_release_direct_mode
@@ -2311,11 +2315,13 @@
   pci_read_config_word
   __pci_register_driver
   pci_release_region
+  pci_remove_root_bus
   pci_request_region
   pci_restore_state
   pci_save_state
   pci_set_master
   pci_set_power_state
+  pci_stop_root_bus
   pci_store_saved_state
   pci_unregister_driver
   pci_walk_bus
@@ -2360,8 +2366,6 @@
   phy_init
   phy_init_eee
   phy_init_hw
-  phy_loopback
-  phy_lookup_setting
   phylink_connect_phy
   phylink_create
   phylink_destroy
@@ -2391,6 +2395,8 @@
   phylink_start
   phylink_stop
   phylink_suspend
+  phy_lookup_setting
+  phy_loopback
   phy_mac_interrupt
   phy_modify
   phy_modify_mmd
@@ -2482,6 +2488,10 @@
   policy_has_boost_freq
   poll_state_synchronize_rcu
   poll_state_synchronize_srcu
+  powercap_register_control_type
+  powercap_register_zone
+  powercap_unregister_control_type
+  powercap_unregister_zone
   power_supply_changed
   power_supply_get_by_name
   power_supply_get_drvdata
@@ -2492,10 +2502,6 @@
   power_supply_set_property
   power_supply_unregister
   power_supply_unreg_notifier
-  powercap_register_control_type
-  powercap_register_zone
-  powercap_unregister_control_type
-  powercap_unregister_zone
   ppp_channel_index
   ppp_dev_name
   ppp_input
@@ -3215,6 +3221,7 @@
   strchrnul
   strcmp
   strcpy
+  strcspn
   stream_open
   strim
   string_get_size
@@ -3301,6 +3308,7 @@
   __task_rq_lock
   task_rq_lock
   tcp_hashinfo
+  tegra_mc_probe_device
   thermal_cdev_update
   thermal_cooling_device_register
   thermal_cooling_device_unregister
@@ -3325,6 +3333,7 @@
   topology_update_thermal_pressure
   _totalram_pages
   _trace_android_vh_record_pcpu_rwsem_starttime
+  _trace_android_vh_record_pcpu_rwsem_time_early
   trace_array_get_by_name
   trace_array_put
   trace_array_set_clr_event
@@ -3445,9 +3454,8 @@
   __traceiter_android_vh_ftrace_oops_exit
   __traceiter_android_vh_ftrace_size_check
   __traceiter_android_vh_gic_v3_suspend
-  __traceiter_android_vh_hibernate_save_cmp_len
-  __traceiter_android_vh_hibernate_state
   __traceiter_android_vh_hibernated_do_mem_alloc
+  __traceiter_android_vh_hibernate_save_cmp_len
   __traceiter_android_vh_ignore_dmabuf_vmap_bounds
   __traceiter_android_vh_init_aes_encrypt
   __traceiter_android_vh_ipi_stop
@@ -3598,9 +3606,8 @@
   __tracepoint_android_vh_ftrace_oops_exit
   __tracepoint_android_vh_ftrace_size_check
   __tracepoint_android_vh_gic_v3_suspend
-  __tracepoint_android_vh_hibernate_save_cmp_len
-  __tracepoint_android_vh_hibernate_state
   __tracepoint_android_vh_hibernated_do_mem_alloc
+  __tracepoint_android_vh_hibernate_save_cmp_len
   __tracepoint_android_vh_ignore_dmabuf_vmap_bounds
   __tracepoint_android_vh_init_aes_encrypt
   __tracepoint_android_vh_ipi_stop
@@ -3815,6 +3822,7 @@
   usb_autopm_put_interface_async
   usb_bus_idr
   usb_bus_idr_lock
+  usb_check_bulk_endpoints
   usb_clear_halt
   usb_composite_setup_continue
   usb_control_msg
@@ -3851,6 +3859,7 @@
   usb_get_from_anchor
   usb_get_intf
   usb_get_urb
+  usb_hcd_is_primary_hcd
   usb_ifnum_to_if
   usb_interface_id
   usb_kill_urb
@@ -3978,10 +3987,10 @@
   vhost_add_used_and_signal
   vhost_dev_check_owner
   vhost_dev_cleanup
+  vhost_dev_flush
   vhost_dev_init
   vhost_dev_ioctl
   vhost_dev_stop
-  vhost_dev_flush
   vhost_disable_notify
   vhost_enable_notify
   vhost_get_vq_desc
@@ -4066,6 +4075,7 @@
   wait_for_completion_interruptible_timeout
   wait_for_completion_killable
   wait_for_completion_timeout
+  wait_for_device_probe
   __wait_rcu_gp
   wait_woken
   __wake_up

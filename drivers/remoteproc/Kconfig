@@ -165,7 +165,7 @@ config QCOM_PIL_INFO
 	tristate
 
 config QCOM_RPROC_COMMON
-	tristate
+	tristate "Qualcomm Technologies, Inc. Remote Proc Common Framework"
 
 config QCOM_Q6V5_COMMON
 	tristate
@@ -234,6 +234,25 @@ config QCOM_Q6V5_PAS
 	  CDSP (Compute DSP), MPSS (Modem Peripheral SubSystem), and
 	  SLPI (Sensor Low Power Island).
 
+config QCOM_SPSS
+	tristate "QTI Secure Subsystem Peripheral loading support"
+	depends on OF && ARCH_QCOM
+	depends on QCOM_SMEM
+	depends on RPMSG_QCOM_SMD || (COMPILE_TEST && RPMSG_QCOM_SMD=n)
+	depends on RPMSG_QCOM_GLINK_SMEM || RPMSG_QCOM_GLINK_SMEM=n
+	depends on QCOM_SYSMON || QCOM_SYSMON=n
+	select MFD_SYSCON
+	select QCOM_MDT_LOADER
+	select QCOM_Q6V5_COMMON
+	select QCOM_RPROC_COMMON
+	select QCOM_SCM
+	help
+	  Say y here to support the TrustZone based Peripheral Image
+	  Loader for the Qualcomm Technologies, Inc. Secure Subsystem
+	  remote processor. This also supports remote processors that
+	  are booted before kernel comes up.
+
+
 config QCOM_Q6V5_WCSS
 	tristate "Qualcomm Hexagon based WCSS Peripheral Image Loader"
 	depends on OF && ARCH_QCOM
@@ -298,6 +317,41 @@ config RCAR_REMOTEPROC
 	  This can be either built-in or a loadable module.
 	  If compiled as module (M), the module name is rcar_rproc.
 
+config QCOM_PANIC_ON_NOTIF_TIMEOUT
+	bool "Trigger kernel panic when notification timeout expires"
+	help
+	  This is a debug feature where a kernel panic is triggered when
+	  communication between subsystems through sysmon is taking too
+	  long. This scneario can happen if the peripheral has died and
+	  is no longer responsive.
+	  Also trigger a kernel panic if invoking the callbacks registered
+	  with a particular subsystem's notifications by the subsystem
+	  notifier framework is taking too long.
+
+config RPROC_SYSMON_NOTIF_TIMEOUT
+	int "Sysmon notifications timeout in ms"
+	default 10000
+	help
+	  The amount of time, in milliseconds, that should elapse between
+	  the start and end of sysmon notifications, before a warning
+	  is emitted.
+
+config RPROC_SSR_NOTIF_TIMEOUT
+	int "SSR notifier timeout in ms"
+	default 10000
+	help
+	  The amount of time, in milliseconds, that should elapse between
+	  the start and end of SSR notifications through the subsystem
+	  notifier, before a warning is emitted.
+
+config QCOM_RPROC_BOTH_DUMPS
+	bool "Collect both minidump and fulldump for subsystem crash"
+	help
+	  Say y here to allow dumping both fulldump and minidump for the
+	  case where subsystem minidump is enabled by policy and the feature
+	  is enabled for a client. The case where minidump is not enabled,
+	  and fulldump is collected by default remains unaffected.
+
 config ST_REMOTEPROC
 	tristate "ST remoteproc support"
 	depends on ARCH_STI
@@ -351,6 +405,18 @@ config TI_K3_R5_REMOTEPROC
 
 	  It's safe to say N here if you're not interested in utilizing
 	  a slave processor.
+
+config MSM_QUIN_SUBSYSTEM_NOTIF_VIRT
+	tristate "MSM QUIN Subsystem Notif Virt"
+	depends on RPMSG_QCOM_GLINK || RPMSG_QCOM_GLINK=n
+	select QCOM_RPROC_COMMON
+	help
+	  This option enables the virtual MSM subsystem notification
+	  framework for the QUIN platform.
+
+	  The virtual MSM subsystem notif framework provides support for
+	  a subsystem to notify its clients of its state, when the clients
+	  are in a different virtual machine domain than the subsystem.
 
 endif # REMOTEPROC
 

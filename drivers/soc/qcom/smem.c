@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015, Sony Mobile Communications AB.
- * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2013, 2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/hwspinlock.h>
@@ -11,6 +12,7 @@
 #include <linux/of_address.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/soc/qcom/qcom_hwspinlock.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/soc/qcom/smem.h>
@@ -85,7 +87,18 @@
 #define SMEM_GLOBAL_HOST	0xfffe
 
 /* Max number of processors/hosts in a system */
-#define SMEM_HOST_COUNT		15
+#define SMEM_HOST_COUNT		20
+
+/* Entry range check
+ * ptr >= start : Checks if ptr is greater than the start of access region
+ * ptr + size >= ptr: Check for integer overflow (On 32bit system where ptr
+ * and size are 32bits, ptr + size can wrap around to be a small integer)
+ * ptr + size <= end: Checks if ptr+size is less than the end of access region
+ */
+#define IN_PARTITION_RANGE(ptr, size, start, end)		\
+	(((void *)(ptr) >= (void *)(start)) &&			\
+	 (((void *)(ptr) + (size)) >= (void *)(ptr)) &&	\
+	 (((void *)(ptr) + (size)) <= (void *)(end)))
 
 /**
   * struct smem_proc_comm - proc_comm communication struct (legacy)
@@ -358,12 +371,39 @@ static struct qcom_smem *__smem;
 /* Timeout (ms) for the trylock of remote spinlocks */
 #define HWSPINLOCK_TIMEOUT	1000
 
+/* The qcom hwspinlock id is always plus one from the smem host id */
+#define SMEM_HOST_ID_TO_HWSPINLOCK_ID(__x) ((__x) + 1)
+
+/**
+ * qcom_smem_bust_hwspin_lock_by_host() - bust the smem hwspinlock for a host
+ * @host:	remote processor id
+ *
+ * Busts the hwspin_lock for the given smem host id. This helper is intended
+ * for remoteproc drivers that manage remoteprocs with an equivalent smem
+ * driver instance in the remote firmware. Drivers can force a release of the
+ * smem hwspin_lock if the rproc unexpectedly goes into a bad state.
+ *
+ * Context: Process context.
+ *
+ * Returns: 0 on success, otherwise negative errno.
+ */
+int qcom_smem_bust_hwspin_lock_by_host(unsigned int host)
+{
+	/* This function is for remote procs, so ignore SMEM_HOST_APPS */
+	if (host == SMEM_HOST_APPS || host >= SMEM_HOST_COUNT)
+		return -EINVAL;
+
+	return qcom_hwspinlock_bust(__smem->hwlock, SMEM_HOST_ID_TO_HWSPINLOCK_ID(host));
+}
+EXPORT_SYMBOL_GPL(qcom_smem_bust_hwspin_lock_by_host);
+
 static int qcom_smem_alloc_private(struct qcom_smem *smem,
 				   struct smem_partition *part,
 				   unsigned item,
 				   size_t size)
 {
 	struct smem_private_entry *hdr, *end;
+	struct smem_private_entry *next_hdr;
 	struct smem_partition_header *phdr;
 	size_t alloc_size;
 	void *cached;
@@ -376,19 +416,25 @@ static int qcom_smem_alloc_private(struct qcom_smem *smem,
 	end = phdr_to_last_uncached_entry(phdr);
 	cached = phdr_to_last_cached_entry(phdr);
 
-	if (WARN_ON((void *)end > p_end || cached > p_end))
+	if (WARN_ON(!IN_PARTITION_RANGE(end, 0, phdr, cached) ||
+						cached > p_end))
 		return -EINVAL;
 
-	while (hdr < end) {
+	while ((hdr < end) && ((hdr + 1) < end)) {
 		if (hdr->canary != SMEM_PRIVATE_CANARY)
 			goto bad_canary;
 		if (le16_to_cpu(hdr->item) == item)
 			return -EEXIST;
 
-		hdr = uncached_entry_next(hdr);
+		next_hdr = uncached_entry_next(hdr);
+
+		if (WARN_ON(next_hdr <= hdr))
+			return -EINVAL;
+
+		hdr = next_hdr;
 	}
 
-	if (WARN_ON((void *)hdr > p_end))
+	if (WARN_ON((void *)hdr > (void *)end))
 		return -EINVAL;
 
 	/* Check that we don't grow into the cached region */
@@ -546,9 +592,11 @@ static void *qcom_smem_get_private(struct qcom_smem *smem,
 				   unsigned item,
 				   size_t *size)
 {
-	struct smem_private_entry *e, *end;
+	struct smem_private_entry *e, *uncached_end, *cached_end;
+	struct smem_private_entry *next_e;
 	struct smem_partition_header *phdr;
 	void *item_ptr, *p_end;
+	size_t entry_size = 0;
 	u32 padding_data;
 	u32 e_size;
 
@@ -556,67 +604,86 @@ static void *qcom_smem_get_private(struct qcom_smem *smem,
 	p_end = (void *)phdr + part->size;
 
 	e = phdr_to_first_uncached_entry(phdr);
-	end = phdr_to_last_uncached_entry(phdr);
+	uncached_end = phdr_to_last_uncached_entry(phdr);
+	cached_end = phdr_to_last_cached_entry(phdr);
 
-	while (e < end) {
+	if (WARN_ON(!IN_PARTITION_RANGE(uncached_end, 0, phdr, cached_end)
+					|| (void *)cached_end > p_end))
+		return ERR_PTR(-EINVAL);
+
+	while ((e < uncached_end) && ((e + 1) < uncached_end)) {
 		if (e->canary != SMEM_PRIVATE_CANARY)
 			goto invalid_canary;
 
 		if (le16_to_cpu(e->item) == item) {
-			if (size != NULL) {
-				e_size = le32_to_cpu(e->size);
-				padding_data = le16_to_cpu(e->padding_data);
+			e_size = le32_to_cpu(e->size);
+			padding_data = le16_to_cpu(e->padding_data);
 
-				if (WARN_ON(e_size > part->size || padding_data > e_size))
-					return ERR_PTR(-EINVAL);
-
-				*size = e_size - padding_data;
-			}
-
-			item_ptr = uncached_entry_to_item(e);
-			if (WARN_ON(item_ptr > p_end))
+			if (e_size < part->size && padding_data < e_size)
+				entry_size = e_size - padding_data;
+			else
 				return ERR_PTR(-EINVAL);
+
+			item_ptr =  uncached_entry_to_item(e);
+
+			if (WARN_ON(!IN_PARTITION_RANGE(item_ptr, entry_size, e, uncached_end)))
+				return ERR_PTR(-EINVAL);
+
+			if (size != NULL)
+				*size = entry_size;
 
 			return item_ptr;
 		}
 
-		e = uncached_entry_next(e);
-	}
+		next_e = uncached_entry_next(e);
+		if (WARN_ON(next_e <= e))
+			return ERR_PTR(-EINVAL);
 
-	if (WARN_ON((void *)e > p_end))
+		e = next_e;
+	}
+	if (WARN_ON((void *)e > (void *)uncached_end))
 		return ERR_PTR(-EINVAL);
 
 	/* Item was not found in the uncached list, search the cached list */
 
-	e = phdr_to_first_cached_entry(phdr, part->cacheline);
-	end = phdr_to_last_cached_entry(phdr);
+	if (cached_end == p_end)
+		return ERR_PTR(-ENOENT);
 
-	if (WARN_ON((void *)e < (void *)phdr || (void *)end > p_end))
+
+	e = phdr_to_first_cached_entry(phdr, part->cacheline);
+
+	if (WARN_ON(!IN_PARTITION_RANGE(cached_end, 0, uncached_end, p_end) ||
+			!IN_PARTITION_RANGE(e, sizeof(*e), cached_end, p_end)))
 		return ERR_PTR(-EINVAL);
 
-	while (e > end) {
+	while (e > cached_end) {
 		if (e->canary != SMEM_PRIVATE_CANARY)
 			goto invalid_canary;
 
 		if (le16_to_cpu(e->item) == item) {
-			if (size != NULL) {
-				e_size = le32_to_cpu(e->size);
-				padding_data = le16_to_cpu(e->padding_data);
+			e_size = le32_to_cpu(e->size);
+			padding_data = le16_to_cpu(e->padding_data);
 
-				if (WARN_ON(e_size > part->size || padding_data > e_size))
-					return ERR_PTR(-EINVAL);
-
-				*size = e_size - padding_data;
-			}
-
-			item_ptr = cached_entry_to_item(e);
-			if (WARN_ON(item_ptr < (void *)phdr))
+			if (e_size < part->size && padding_data < e_size)
+				entry_size  = e_size - padding_data;
+			else
 				return ERR_PTR(-EINVAL);
+
+			item_ptr =  cached_entry_to_item(e);
+			if (WARN_ON(!IN_PARTITION_RANGE(item_ptr, entry_size, cached_end, e)))
+				return ERR_PTR(-EINVAL);
+
+			if (size != NULL)
+				*size = entry_size;
 
 			return item_ptr;
 		}
 
-		e = cached_entry_next(e, part->cacheline);
+		next_e = cached_entry_next(e, part->cacheline);
+		if (WARN_ON(next_e >= e))
+			return ERR_PTR(-EINVAL);
+
+		e = next_e;
 	}
 
 	if (WARN_ON((void *)e < (void *)phdr))
@@ -640,7 +707,7 @@ invalid_canary:
  * Looks up smem item and returns pointer to it. Size of smem
  * item is returned in @size.
  */
-void *qcom_smem_get(unsigned host, unsigned item, size_t *size)
+void *qcom_smem_get(unsigned int host, unsigned int item, size_t *size)
 {
 	struct smem_partition *part;
 	unsigned long flags;
@@ -1049,7 +1116,7 @@ static int qcom_smem_probe(struct platform_device *pdev)
 		num_regions++;
 
 	array_size = num_regions * sizeof(struct smem_region);
-	smem = devm_kzalloc(&pdev->dev, sizeof(*smem) + array_size, GFP_KERNEL);
+	smem = kzalloc(sizeof(*smem) + array_size, GFP_KERNEL);
 	if (!smem)
 		return -ENOMEM;
 
@@ -1067,19 +1134,19 @@ static int qcom_smem_probe(struct platform_device *pdev)
 		 */
 		ret = qcom_smem_resolve_mem(smem, "memory-region", &smem->regions[0]);
 		if (ret)
-			return ret;
+			goto release;
 	}
 
 	if (num_regions > 1) {
 		ret = qcom_smem_resolve_mem(smem, "qcom,rpm-msg-ram", &smem->regions[1]);
 		if (ret)
-			return ret;
+			goto release;
 	}
 
 
 	ret = qcom_smem_map_toc(smem, &smem->regions[0]);
 	if (ret)
-		return ret;
+		goto release;
 
 	for (i = 1; i < num_regions; i++) {
 		smem->regions[i].virt_base = devm_ioremap_wc(&pdev->dev,
@@ -1087,7 +1154,8 @@ static int qcom_smem_probe(struct platform_device *pdev)
 							     smem->regions[i].size);
 		if (!smem->regions[i].virt_base) {
 			dev_err(&pdev->dev, "failed to remap %pa\n", &smem->regions[i].aux_base);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto release;
 		}
 	}
 
@@ -1095,23 +1163,27 @@ static int qcom_smem_probe(struct platform_device *pdev)
 	if (le32_to_cpu(header->initialized) != 1 ||
 	    le32_to_cpu(header->reserved)) {
 		dev_err(&pdev->dev, "SMEM is not initialized by SBL\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto release;
 	}
 
 	hwlock_id = of_hwspin_lock_get_id(pdev->dev.of_node, 0);
 	if (hwlock_id < 0) {
 		if (hwlock_id != -EPROBE_DEFER)
 			dev_err(&pdev->dev, "failed to retrieve hwlock\n");
-		return hwlock_id;
+			ret = hwlock_id;
+			goto release;
 	}
 
 	smem->hwlock = hwspin_lock_request_specific(hwlock_id);
-	if (!smem->hwlock)
-		return -ENXIO;
+	if (!smem->hwlock) {
+		ret = -ENXIO;
+		goto release;
+	}
 
 	ret = hwspin_lock_timeout_irqsave(smem->hwlock, HWSPINLOCK_TIMEOUT, &flags);
 	if (ret)
-		return ret;
+		goto release;
 	size = readl_relaxed(&header->available) + readl_relaxed(&header->free_offset);
 	hwspin_unlock_irqrestore(smem->hwlock, &flags);
 
@@ -1126,7 +1198,7 @@ static int qcom_smem_probe(struct platform_device *pdev)
 	case SMEM_GLOBAL_PART_VERSION:
 		ret = qcom_smem_set_global_partition(smem);
 		if (ret < 0)
-			return ret;
+			goto release;
 		smem->item_count = qcom_smem_get_item_count(smem);
 		break;
 	case SMEM_GLOBAL_HEAP_VERSION:
@@ -1135,13 +1207,14 @@ static int qcom_smem_probe(struct platform_device *pdev)
 		break;
 	default:
 		dev_err(&pdev->dev, "Unsupported SMEM version 0x%x\n", version);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto release;
 	}
 
 	BUILD_BUG_ON(SMEM_HOST_APPS >= SMEM_HOST_COUNT);
 	ret = qcom_smem_enumerate_partitions(smem, SMEM_HOST_APPS);
 	if (ret < 0 && ret != -ENOENT)
-		return ret;
+		goto release;
 
 	__smem = smem;
 
@@ -1152,6 +1225,10 @@ static int qcom_smem_probe(struct platform_device *pdev)
 		dev_dbg(&pdev->dev, "failed to register socinfo device\n");
 
 	return 0;
+
+release:
+	kfree(smem);
+	return ret;
 }
 
 static int qcom_smem_remove(struct platform_device *pdev)
@@ -1159,10 +1236,49 @@ static int qcom_smem_remove(struct platform_device *pdev)
 	platform_device_unregister(__smem->socinfo);
 
 	hwspin_lock_free(__smem->hwlock);
+	/*
+	 * In case of Hibernation Restore __smem object is still valid
+	 * and we call probe again so same object get allocated again
+	 * that result into possible memory leak, hence explicitly freeing
+	 * it here.
+	 */
+	kfree(__smem);
 	__smem = NULL;
 
 	return 0;
 }
+
+static int qcom_smem_freeze(struct device *dev)
+{
+	struct platform_device *pdev = container_of(dev, struct
+					platform_device, dev);
+
+	qcom_smem_remove(pdev);
+
+	return 0;
+}
+
+static int qcom_smem_restore(struct device *dev)
+{
+	int ret = 0;
+	struct platform_device *pdev = container_of(dev, struct
+					platform_device, dev);
+
+	/*
+	 * SMEM related information has to fetched again
+	 * during resuming from Hibernation, Hence call probe.
+	 */
+	ret = qcom_smem_probe(pdev);
+	if (ret)
+		dev_err(dev, "Error getting SMEM information\n");
+	return ret;
+}
+
+static const struct dev_pm_ops qcom_smem_pm_ops = {
+	.freeze_late = qcom_smem_freeze,
+	.restore_early = qcom_smem_restore,
+	.thaw_early = qcom_smem_restore,
+};
 
 static const struct of_device_id qcom_smem_of_match[] = {
 	{ .compatible = "qcom,smem" },
@@ -1177,6 +1293,7 @@ static struct platform_driver qcom_smem_driver = {
 		.name = "qcom-smem",
 		.of_match_table = qcom_smem_of_match,
 		.suppress_bind_attrs = true,
+		.pm = &qcom_smem_pm_ops,
 	},
 };
 
@@ -1195,3 +1312,4 @@ module_exit(qcom_smem_exit)
 MODULE_AUTHOR("Bjorn Andersson <bjorn.andersson@sonymobile.com>");
 MODULE_DESCRIPTION("Qualcomm Shared Memory Manager");
 MODULE_LICENSE("GPL v2");
+MODULE_SOFTDEP("pre: qcom_hwspinlock");

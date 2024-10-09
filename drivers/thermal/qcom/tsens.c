@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  * Copyright (c) 2019, 2020, Linaro Ltd.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/debugfs.h>
@@ -17,9 +18,12 @@
 #include <linux/pm.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
 #include <linux/thermal.h>
+#include <linux/thermal_minidump.h>
 #include "../thermal_hwmon.h"
 #include "tsens.h"
+#include "thermal_zone_internal.h"
 
 /**
  * struct tsens_irq_data - IRQ status and temperature violations
@@ -209,6 +213,8 @@ static void tsens_set_interrupt_v1(struct tsens_priv *priv, u32 hw_id,
 		break;
 	case CRITICAL:
 		/* No critical interrupts before v2 */
+	case COLD:
+		/* No cold interrupt before v2 */
 		return;
 	}
 	regmap_field_write(priv->rf[index], enable ? 0 : 1);
@@ -239,6 +245,9 @@ static void tsens_set_interrupt_v2(struct tsens_priv *priv, u32 hw_id,
 		index_mask  = CRIT_INT_MASK_0 + hw_id;
 		index_clear = CRIT_INT_CLEAR_0 + hw_id;
 		break;
+	case COLD:
+		/* Nothing to handle for cold interrupt */
+		return;
 	}
 
 	if (enable) {
@@ -264,7 +273,7 @@ static void tsens_set_interrupt_v2(struct tsens_priv *priv, u32 hw_id,
 static void tsens_set_interrupt(struct tsens_priv *priv, u32 hw_id,
 				enum tsens_irq_type irq_type, bool enable)
 {
-	dev_dbg(priv->dev, "[%u] %s: %s -> %s\n", hw_id, __func__,
+	TSENS_DBG_1(priv, "[%u] %s: %s -> %s\n", hw_id, __func__,
 		irq_type ? ((irq_type == 1) ? "UP" : "CRITICAL") : "LOW",
 		enable ? "en" : "dis");
 	if (tsens_version(priv) > VER_1_X)
@@ -348,7 +357,7 @@ static int tsens_read_irq_state(struct tsens_priv *priv, u32 hw_id,
 	d->up_thresh  = tsens_hw_to_mC(s, UP_THRESH_0 + hw_id);
 	d->low_thresh = tsens_hw_to_mC(s, LOW_THRESH_0 + hw_id);
 
-	dev_dbg(priv->dev, "[%u] %s%s: status(%u|%u|%u) | clr(%u|%u|%u) | mask(%u|%u|%u)\n",
+	TSENS_DBG_1(priv, "[%u] %s%s: status(%u|%u|%u) | clr(%u|%u|%u) | mask(%u|%u|%u)\n",
 		hw_id, __func__,
 		(d->up_viol || d->low_viol || d->crit_viol) ? "(V)" : "",
 		d->low_viol, d->up_viol, d->crit_viol,
@@ -368,6 +377,35 @@ static inline u32 masked_irq(u32 hw_id, u32 mask, enum tsens_ver ver)
 
 	/* v1, v0.1 don't have a irq mask register */
 	return 0;
+}
+
+/**
+ * tsens_cold_irq_thread - Threaded interrupt handler for cold interrupt
+ * @irq: irq number
+ * @data: tsens controller private data
+ *
+ * Whenever interrupt triggers notify thermal framework using
+ * thermal_zone_device_update().
+ *
+ * Return: IRQ_HANDLED
+ */
+
+irqreturn_t tsens_cold_irq_thread(int irq, void *data)
+{
+	struct tsens_priv *priv = data;
+	struct tsens_sensor *s = priv->cold_sensor;
+	int cold_status, ret;
+
+	ret = regmap_field_read(priv->rf[COLD_STATUS], &cold_status);
+	if (ret)
+		return ret;
+
+	dev_dbg(priv->dev, "[%u] %s: cold interrupt is %s\n",
+		s->hw_id, __func__, cold_status ? "triggered" : "cleared");
+
+	thermal_zone_device_update(s->tzd, THERMAL_EVENT_UNSPECIFIED);
+
+	return IRQ_HANDLED;
 }
 
 /**
@@ -407,7 +445,7 @@ static irqreturn_t tsens_critical_irq_thread(int irq, void *data)
 			if (ret)
 				return ret;
 			if (wdog_count)
-				dev_dbg(priv->dev, "%s: watchdog count: %d\n",
+				TSENS_DBG_1(priv, "%s: watchdog count: %d\n",
 					__func__, wdog_count);
 
 			/* Fall through to handle critical interrupts if any */
@@ -465,7 +503,7 @@ static irqreturn_t tsens_irq_thread(int irq, void *data)
 
 	for (i = 0; i < priv->num_sensors; i++) {
 		bool trigger = false;
-		const struct tsens_sensor *s = &priv->sensor[i];
+		struct tsens_sensor *s = &priv->sensor[i];
 		u32 hw_id = s->hw_id;
 
 		if (!s->tzd)
@@ -510,6 +548,7 @@ static irqreturn_t tsens_irq_thread(int irq, void *data)
 		spin_unlock_irqrestore(&priv->ul_lock, flags);
 
 		if (trigger) {
+			s->cached_temp = temp;
 			dev_dbg(priv->dev, "[%u] %s: TZ update trigger (%d mC)\n",
 				hw_id, __func__, temp);
 			thermal_zone_device_update(s->tzd,
@@ -527,7 +566,9 @@ static irqreturn_t tsens_irq_thread(int irq, void *data)
 			 */
 			break;
 		}
+		s->cached_temp = INT_MIN;
 	}
+	TSENS_DBG_1(priv, "%s: irq[%d] exit", __func__, irq);
 
 	return IRQ_HANDLED;
 }
@@ -570,7 +611,7 @@ static int tsens_set_trips(struct thermal_zone_device *tz, int low, int high)
 
 	spin_unlock_irqrestore(&priv->ul_lock, flags);
 
-	dev_dbg(dev, "[%u] %s: (%d:%d)->(%d:%d)\n",
+	TSENS_DBG_1(priv, "[%u] %s: (%d:%d)->(%d:%d)\n",
 		hw_id, __func__, d.low_thresh, d.up_thresh, cl_low, cl_high);
 
 	return 0;
@@ -594,6 +635,21 @@ static void tsens_disable_irq(struct tsens_priv *priv)
 	regmap_field_write(priv->rf[INT_EN], 0);
 }
 
+int get_cold_int_status(const struct tsens_sensor *s, bool *cold_status)
+{
+	struct tsens_priv *priv = s->priv;
+	int prev_cold = 0, ret;
+
+	ret = regmap_field_read(priv->rf[COLD_STATUS], &prev_cold);
+	if (ret)
+		return ret;
+
+	*cold_status = (bool)prev_cold;
+
+	return 0;
+}
+
+
 int get_temp_tsens_valid(const struct tsens_sensor *s, int *temp)
 {
 	struct tsens_priv *priv = s->priv;
@@ -602,6 +658,11 @@ int get_temp_tsens_valid(const struct tsens_sensor *s, int *temp)
 	u32 valid_idx = VALID_0 + hw_id;
 	u32 valid;
 	int ret;
+
+	if (s->cached_temp != INT_MIN) {
+		*temp = s->cached_temp;
+		goto dump_and_exit;
+	}
 
 	/* VER_0 doesn't have VALID bit */
 	if (tsens_version(priv) == VER_0)
@@ -621,6 +682,18 @@ int get_temp_tsens_valid(const struct tsens_sensor *s, int *temp)
 get_temp:
 	/* Valid bit is set, OK to read the temperature */
 	*temp = tsens_hw_to_mC(s, temp_idx);
+
+	/* Save temperature data to minidump */
+	if (s->priv->tsens_md && s->tzd)
+		thermal_minidump_update_data(s->priv->tsens_md,
+			s->tzd->type, temp);
+
+dump_and_exit:
+	if (s->tzd)
+		TSENS_DBG(priv, "Sensor_id: %d name:%s temp: %d",
+				hw_id, s->tzd->type, *temp);
+	else
+		TSENS_DBG(priv, "Sensor_id: %d temp: %d", hw_id, *temp);
 
 	return 0;
 }
@@ -647,6 +720,8 @@ int get_temp_common(const struct tsens_sensor *s, int *temp)
 			return ret;
 
 		*temp = code_to_degc(last_temp, s) * 1000;
+
+		TSENS_DBG(priv, "Sensor_id: %d temp: %d", hw_id, *temp);
 
 		return 0;
 	} while (time_before(jiffies, timeout));
@@ -705,6 +780,7 @@ static void tsens_debug_init(struct platform_device *pdev)
 {
 	struct tsens_priv *priv = platform_get_drvdata(pdev);
 	struct dentry *root, *file;
+	char tsens_name[32];
 
 	root = debugfs_lookup("tsens", NULL);
 	if (!root)
@@ -720,6 +796,25 @@ static void tsens_debug_init(struct platform_device *pdev)
 	/* A directory for each instance of the TSENS IP */
 	priv->debug = debugfs_create_dir(dev_name(&pdev->dev), priv->debug_root);
 	debugfs_create_file("sensors", 0444, priv->debug, pdev, &dbg_sensors_fops);
+
+	/* Enable TSENS IPC logging context */
+	snprintf(tsens_name, sizeof(tsens_name), "%s_0", dev_name(&pdev->dev));
+	priv->ipc_log = ipc_log_context_create(IPC_LOGPAGES, tsens_name, 0);
+	if (!priv->ipc_log)
+		dev_err(&pdev->dev, "%s: unable to create IPC Logging for %s\n",
+				__func__, tsens_name);
+
+	snprintf(tsens_name, sizeof(tsens_name), "%s_1", dev_name(&pdev->dev));
+	priv->ipc_log1 = ipc_log_context_create(IPC_LOGPAGES, tsens_name, 0);
+	if (!priv->ipc_log1)
+		dev_err(&pdev->dev, "%s: unable to create IPC Logging for %s\n",
+				__func__, tsens_name);
+
+	snprintf(tsens_name, sizeof(tsens_name), "%s_2", dev_name(&pdev->dev));
+	priv->ipc_log2 = ipc_log_context_create(0x1, tsens_name, 0);
+	if (!priv->ipc_log2)
+		dev_err(&pdev->dev, "%s: unable to create IPC Logging for %s\n",
+				__func__, tsens_name);
 }
 #else
 static inline void tsens_debug_init(struct platform_device *pdev) {}
@@ -739,7 +834,32 @@ static const struct regmap_config tsens_srot_config = {
 	.reg_stride	= 4,
 };
 
+static int init_cold_interrupt(struct tsens_priv *priv,
+				struct platform_device *op, u32 ver_minor)
+{
+	struct device *dev = priv->dev;
+	int ret = 0;
+
+	if (tsens_version(priv) > VER_1_X &&  ver_minor > 5) {
+		/* COLD interrupt is present only on v2.6+ */
+		priv->feat->cold_int = 1;
+		priv->rf[COLD_STATUS] = devm_regmap_field_alloc(
+						dev,
+						priv->tm_map,
+						priv->fields[COLD_STATUS]);
+		if (IS_ERR(priv->rf[COLD_STATUS])) {
+			ret = PTR_ERR(priv->rf[COLD_STATUS]);
+		}
+	}
+
+	return ret;
+}
+
+#if IS_MODULE(CONFIG_QCOM_TSENS)
+int init_common(struct tsens_priv *priv)
+#else
 int __init init_common(struct tsens_priv *priv)
+#endif
 {
 	void __iomem *tm_base, *srot_base;
 	struct device *dev = priv->dev;
@@ -912,6 +1032,8 @@ int __init init_common(struct tsens_priv *priv)
 		regmap_field_write(priv->rf[CC_MON_MASK], 1);
 	}
 
+	init_cold_interrupt(priv, op, ver_minor);
+
 	spin_lock_init(&priv->ul_lock);
 
 	/* VER_0 interrupt doesn't need to be enabled */
@@ -924,6 +1046,31 @@ err_put_device:
 	put_device(&op->dev);
 	return ret;
 }
+
+/**
+ * tsens_get_cold_status - It gets cold temperature status of TSENS
+ * @data: tsens cold sensor private data
+ * @cold_status: pointer to store last cold interrupt status
+ *
+ * It gives cold state value of 0 or 1 on success. A state
+ * value of 1 indicates minimum one TSENS is in cold temperature
+ * condition and a state value of 0 indicates all TSENS are out of
+ * cold temperature condition.
+ *
+ * Return: 0 on success, a negative errno will be returned in
+ * error cases.
+ */
+static int tsens_get_cold_status(struct thermal_zone_device *tz, int *cold_status)
+{
+	struct tsens_sensor *s = tz->devdata;
+	struct tsens_priv *priv = s->priv;
+
+	if (priv->ops->get_cold_status)
+		return priv->ops->get_cold_status(s, (bool *)cold_status);
+
+	return -EOPNOTSUPP;
+}
+
 
 static int tsens_get_temp(struct thermal_zone_device *tz, int *temp)
 {
@@ -997,10 +1144,16 @@ MODULE_DEVICE_TABLE(of, tsens_table);
 static const struct thermal_zone_device_ops tsens_of_ops = {
 	.get_temp = tsens_get_temp,
 	.set_trips = tsens_set_trips,
+	.get_trend = qti_tz_get_trend,
 };
 
+static const struct thermal_zone_device_ops tsens_cold_of_ops = {
+	.get_temp = tsens_get_cold_status,
+};
+
+
 static int tsens_register_irq(struct tsens_priv *priv, char *irqname,
-			      irq_handler_t thread_fn)
+			      irq_handler_t thread_fn, int *irq_num)
 {
 	struct platform_device *pdev;
 	int ret, irq;
@@ -1010,6 +1163,7 @@ static int tsens_register_irq(struct tsens_priv *priv, char *irqname,
 		return -ENODEV;
 
 	irq = platform_get_irq_byname(pdev, irqname);
+	*irq_num = irq;
 	if (irq < 0) {
 		ret = irq;
 		/* For old DTs with no IRQ defined */
@@ -1040,10 +1194,138 @@ static int tsens_register_irq(struct tsens_priv *priv, char *irqname,
 	return ret;
 }
 
+static int tsens_reinit(struct tsens_priv *priv)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&priv->ul_lock, flags);
+
+	/*
+	 * Re-enable the watchdog, unmask the bark.
+	 * Disable cycle completion monitoring
+	 */
+	if (priv->feat->has_watchdog) {
+		regmap_field_write(priv->rf[WDOG_BARK_MASK], 0);
+		regmap_field_write(priv->rf[CC_MON_MASK], 1);
+	}
+
+	if (tsens_version(priv) >= VER_0_1)
+		tsens_enable_irq(priv);
+
+	spin_unlock_irqrestore(&priv->ul_lock, flags);
+
+	return 0;
+}
+
+int tsens_v2_tsens_suspend(struct tsens_priv *priv)
+{
+	if ((pm_suspend_target_state != PM_SUSPEND_MEM) && !priv->tm_disable_on_suspend)
+		return 0;
+
+	if (priv->uplow_irq > 0) {
+		disable_irq_nosync(priv->uplow_irq);
+		disable_irq_wake(priv->uplow_irq);
+	}
+
+	if (priv->feat->crit_int && priv->crit_irq > 0) {
+		disable_irq_nosync(priv->crit_irq);
+		disable_irq_wake(priv->crit_irq);
+	}
+
+	return 0;
+}
+
+int tsens_v2_tsens_resume(struct tsens_priv *priv)
+{
+	if ((pm_suspend_target_state != PM_SUSPEND_MEM) && !priv->tm_disable_on_suspend)
+		return 0;
+
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		tsens_reinit(priv);
+
+	if (priv->uplow_irq > 0) {
+		enable_irq(priv->uplow_irq);
+		enable_irq_wake(priv->uplow_irq);
+	}
+
+	if (priv->feat->crit_int && priv->crit_irq > 0) {
+		enable_irq(priv->crit_irq);
+		enable_irq_wake(priv->crit_irq);
+	}
+
+	return 0;
+}
+
+static void tsens_thermal_zone_trip_update(struct thermal_zone_device *tz,
+					  int trip_id)
+{
+	u32 trip_delta = 0;
+
+	if (!of_thermal_is_trip_valid(tz, trip_id) || !tz->trips)
+		return;
+
+	if (tz->trips[trip_id].type == THERMAL_TRIP_CRITICAL)
+		return;
+
+	if (tz->trips[trip_id].type == THERMAL_TRIP_HOT)
+		trip_delta = TSENS_ELEVATE_HOT_DELTA;
+	else if (strnstr(tz->type, "cpu", sizeof(tz->type)))
+		trip_delta = TSENS_ELEVATE_CPU_DELTA;
+	else
+		trip_delta = TSENS_ELEVATE_DELTA;
+
+	mutex_lock(&tz->lock);
+	tz->trips[trip_id].temperature += trip_delta;
+	mutex_unlock(&tz->lock);
+
+	thermal_zone_device_update(tz, THERMAL_EVENT_UNSPECIFIED);
+}
+
+static int tsens_nvmem_trip_update(struct thermal_zone_device *tz)
+{
+	int i, num_trips = 0;
+
+	if (strnstr(tz->type, "mdmss", sizeof(tz->type)))
+		return 0;
+
+	num_trips = of_thermal_get_ntrips(tz);
+	/* First trip is for userspace, update all other trips. */
+	for (i = 1; i < num_trips; i++)
+		tsens_thermal_zone_trip_update(tz, i);
+
+	return 0;
+}
+
+static bool tsens_is_nvmem_trip_update_needed(struct tsens_priv *priv)
+{
+	int ret;
+	u32 itemp = 0;
+
+	if (!of_property_read_bool(priv->dev->of_node, "nvmem-cells"))
+		return false;
+
+	ret = nvmem_cell_read_variable_le_u32(priv->dev,
+			"tsens_itemp", &itemp);
+	if (ret) {
+		dev_err(priv->dev,
+			"%s: Not able to read tsens_chipinfo nvmem, ret:%d\n",
+			__func__, ret);
+		return false;
+	}
+
+	TSENS_DBG_2(priv, "itemp fuse:0x%x", itemp);
+	if (itemp)
+		return true;
+
+	return false;
+}
+
 static int tsens_register(struct tsens_priv *priv)
 {
-	int i, ret;
+	int i, temp, ret;
 	struct thermal_zone_device *tzd;
+
+	priv->need_trip_update = tsens_is_nvmem_trip_update_needed(priv);
 
 	for (i = 0;  i < priv->num_sensors; i++) {
 		priv->sensor[i].priv = priv;
@@ -1052,6 +1334,18 @@ static int tsens_register(struct tsens_priv *priv)
 						    &tsens_of_ops);
 		if (IS_ERR(tzd))
 			continue;
+
+		if (priv->ops->get_temp) {
+			ret = priv->ops->get_temp(&priv->sensor[i], &temp);
+			if (ret) {
+				dev_err(priv->dev, "[%u] %s: error reading sensor\n",
+					priv->sensor[i].hw_id, __func__);
+				continue;
+			}
+			TSENS_DBG_2(priv, "Sensor_id: %d name:%s temp: %d",
+					priv->sensor[i].hw_id, tzd->type, temp);
+		}
+
 		priv->sensor[i].tzd = tzd;
 		if (priv->ops->enable)
 			priv->ops->enable(priv, i);
@@ -1059,6 +1353,10 @@ static int tsens_register(struct tsens_priv *priv)
 		if (devm_thermal_add_hwmon_sysfs(tzd))
 			dev_warn(priv->dev,
 				 "Failed to add hwmon sysfs attributes\n");
+		/* update tsens trip based on fuse register */
+		if (priv->need_trip_update)
+			ret = tsens_nvmem_trip_update(tzd);
+		qti_update_tz_ops(tzd, true);
 	}
 
 	/* VER_0 require to set MIN and MAX THRESH
@@ -1074,14 +1372,38 @@ static int tsens_register(struct tsens_priv *priv)
 				   tsens_mC_to_hw(priv->sensor, 0));
 	}
 
-	ret = tsens_register_irq(priv, "uplow", tsens_irq_thread);
+	ret = tsens_register_irq(priv, "uplow", tsens_irq_thread,
+					&priv->uplow_irq);
+
 	if (ret < 0)
 		return ret;
 
 	if (priv->feat->crit_int)
 		ret = tsens_register_irq(priv, "critical",
-					 tsens_critical_irq_thread);
+					 tsens_critical_irq_thread, &priv->crit_irq);
 
+	if (priv->feat->cold_int) {
+		priv->cold_sensor = devm_kzalloc(priv->dev,
+					sizeof(struct tsens_sensor),
+					GFP_KERNEL);
+		if (!priv->cold_sensor)
+			return -ENOMEM;
+
+		priv->cold_sensor->hw_id = COLD_SENSOR_HW_ID;
+		priv->cold_sensor->priv = priv;
+		tzd = devm_thermal_of_zone_register(priv->dev,
+					priv->cold_sensor->hw_id,
+					priv->cold_sensor,
+					&tsens_cold_of_ops);
+		if (IS_ERR(tzd)) {
+			ret = 0;
+			return ret;
+		}
+
+		priv->cold_sensor->tzd = tzd;
+		ret = tsens_register_irq(priv, "cold",
+					tsens_cold_irq_thread, &priv->cold_irq);
+	}
 	return ret;
 }
 
@@ -1132,6 +1454,7 @@ static int tsens_probe(struct platform_device *pdev)
 			priv->sensor[i].hw_id = data->hw_ids[i];
 		else
 			priv->sensor[i].hw_id = i;
+		priv->sensor[i].cached_temp = INT_MIN;
 	}
 	priv->feat = data->feat;
 	priv->fields = data->fields;
@@ -1156,17 +1479,28 @@ static int tsens_probe(struct platform_device *pdev)
 		}
 	}
 
+	priv->tsens_md = thermal_minidump_register(np->name);
+	priv->tm_disable_on_suspend =
+				of_property_read_bool(np, "tm-disable-on-suspend");
+
 	return tsens_register(priv);
 }
 
 static int tsens_remove(struct platform_device *pdev)
 {
 	struct tsens_priv *priv = platform_get_drvdata(pdev);
+	int i;
 
 	debugfs_remove_recursive(priv->debug_root);
 	tsens_disable_irq(priv);
 	if (priv->ops->disable)
 		priv->ops->disable(priv);
+
+	for (i = 0; i < priv->num_sensors; i++)
+		if (priv->sensor[i].tzd)
+			qti_update_tz_ops(priv->sensor[i].tzd, false);
+
+	thermal_minidump_unregister(priv->tsens_md);
 
 	return 0;
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2015 Srinivas Kandagatla <srinivas.kandagatla@linaro.org>
+ * Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -123,6 +124,94 @@ static const struct nvmem_keepout sc7280_qfprom_keepout[] = {
 static const struct qfprom_soc_compatible_data sc7280_qfprom = {
 	.keepout = sc7280_qfprom_keepout,
 	.nkeepout = ARRAY_SIZE(sc7280_qfprom_keepout)
+};
+
+static const struct nvmem_keepout cliffs_qfprom_keepout[] = {
+	{.start = 0x20, .end = 0x24},
+	{.start = 0x28, .end = 0x30},
+	{.start = 0x34, .end = 0x40},
+	{.start = 0x58, .end = 0x60},
+	{.start = 0x68, .end = 0x70},
+	{.start = 0x78, .end = 0x80},
+	{.start = 0x90, .end = 0x100},
+	{.start = 0x148, .end = 0x200},
+	{.start = 0x238, .end = 0x300},
+	{.start = 0x328, .end = 0x400},
+	{.start = 0x4a8, .end = 0x500},
+	{.start = 0x550, .end = 0x600},
+	{.start = 0x608, .end = 0x610},
+	{.start = 0x618, .end = 0x630},
+	{.start = 0x638, .end = 0x700},
+	{.start = 0x738, .end = 0x73c},
+	{.start = 0x748, .end = 0x770},
+	{.start = 0x898, .end = 0xa00},
+	{.start = 0xa48, .end = 0xb00},
+	{.start = 0xb04, .end = 0xb10},
+	{.start = 0xc80, .end = 0x1000}
+};
+
+static const struct qfprom_soc_compatible_data cliffs_qfprom = {
+	.keepout = cliffs_qfprom_keepout,
+	.nkeepout = ARRAY_SIZE(cliffs_qfprom_keepout)
+};
+
+static const struct nvmem_keepout pitti_qfprom_keepout[] = {
+	{ .start = 0xa20, .end = 0x203c },  { .start = 0x2070, .end = 0x208c },
+	{ .start = 0x209c, .end = 0x20a8 }, { .start = 0x20ac, .end = 0x20f0 },
+	{ .start = 0x20f4, .end = 0x2100 }, { .start = 0x2114, .end = 0x2120 },
+	{ .start = 0x2124, .end = 0x2144 }, { .start = 0x214c, .end = 0x4000 },
+	{ .start = 0x4a20, .end = 0x6000 }, { .start = 0x6064, .end = 0x6070 },
+	{ .start = 0x6074, .end = 0x607c }, { .start = 0x6080, .end = 0x60c0 },
+	{ .start = 0x60e4, .end = 0x6100 }, { .start = 0x6104, .end = 0x6110 },
+	{ .start = 0x611c, .end = 0x6130 }, { .start = 0x6148, .end = 0x6150 },
+	{ .start = 0x6154, .end = 0x6160 }, { .start = 0x6170, .end = 0x6190 },
+	{ .start = 0x61c0, .end = 0x61f0 }, { .start = 0x61f8, .end = 0x6200 },
+	{ .start = 0x6220, .end = 0x6250 }, { .start = 0x6260, .end = 0x6300 },
+	{ .start = 0x630c, .end = 0x6400 }, { .start = 0x6440, .end = 0x7000 },
+};
+
+static const struct qfprom_soc_compatible_data pitti_qfprom = {
+	.keepout = pitti_qfprom_keepout,
+	.nkeepout = ARRAY_SIZE(pitti_qfprom_keepout)
+};
+
+static const struct nvmem_keepout niobe_qfprom_keepout[] = {
+	{.start = 0x20, .end = 0x24},
+	{.start = 0x28, .end = 0x30},
+	{.start = 0x34, .end = 0x40},
+	{.start = 0x58, .end = 0x60},
+	{.start = 0x68, .end = 0x70},
+	{.start = 0x78, .end = 0x80},
+	{.start = 0x90, .end = 0x100},
+	{.start = 0x150, .end = 0x200},
+	{.start = 0x238, .end = 0x300},
+	{.start = 0x328, .end = 0x400},
+	{.start = 0x4a8, .end = 0x500},
+	{.start = 0x550, .end = 0x600},
+	{.start = 0x608, .end = 0x610},
+	{.start = 0x618, .end = 0x630},
+	{.start = 0x638, .end = 0x700},
+	{.start = 0x738, .end = 0x73c},
+	{.start = 0x748, .end = 0x770},
+	{.start = 0x898, .end = 0xa00},
+	{.start = 0xa50, .end = 0xb00},
+	{.start = 0xb04, .end = 0xb10},
+	{.start = 0xcc0, .end = 0x1000},
+};
+
+static const struct qfprom_soc_compatible_data niobe_qfprom = {
+	.keepout = niobe_qfprom_keepout,
+	.nkeepout = ARRAY_SIZE(niobe_qfprom_keepout)
+};
+
+static const struct nvmem_keepout pineapple_qfprom_keepout[] = {
+	{.start = 0, .end = 0x9b},
+	{.start = 0x9c, .end = 0x1000},
+};
+
+static const struct qfprom_soc_compatible_data pineapple_qfprom = {
+	.keepout = pineapple_qfprom_keepout,
+	.nkeepout = ARRAY_SIZE(pineapple_qfprom_keepout)
 };
 
 /**
@@ -322,15 +411,28 @@ static int qfprom_reg_read(void *context,
 {
 	struct qfprom_priv *priv = context;
 	u8 *val = _val;
-	int i = 0, words = bytes;
+	int buf_start, buf_end, index, i = 0;
 	void __iomem *base = priv->qfpcorrected;
+	char *buffer = NULL;
+	u32 read_val;
 
 	if (read_raw_data && priv->qfpraw)
 		base = priv->qfpraw;
+	buf_start = ALIGN_DOWN(reg, 4);
+	buf_end = ALIGN(reg + bytes, 4);
+	buffer = kzalloc(buf_end - buf_start, GFP_KERNEL);
+	if (!buffer) {
+		pr_err("memory allocation failed in %s\n", __func__);
+		return -ENOMEM;
+	}
 
-	while (words--)
-		*val++ = readb(base + reg + i++);
+	for (index = buf_start; index < buf_end; index += 4, i += 4) {
+		read_val = readl_relaxed(base + index);
+		memcpy(buffer + i, &read_val, 4);
+	}
 
+	memcpy(val, buffer + reg % 4, bytes);
+	kfree(buffer);
 	return 0;
 }
 
@@ -368,7 +470,6 @@ static int qfprom_probe(struct platform_device *pdev)
 	const struct qfprom_soc_compatible_data *soc_data;
 	struct qfprom_priv *priv;
 	int ret;
-
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
@@ -453,6 +554,10 @@ static const struct of_device_id qfprom_of_match[] = {
 	{ .compatible = "qcom,qfprom",},
 	{ .compatible = "qcom,sc7180-qfprom", .data = &sc7180_qfprom},
 	{ .compatible = "qcom,sc7280-qfprom", .data = &sc7280_qfprom},
+	{ .compatible = "qcom,cliffs-qfprom", .data = &cliffs_qfprom},
+	{ .compatible = "qcom,pitti-qfprom", .data = &pitti_qfprom},
+	{ .compatible = "qcom,niobe-qfprom", .data = &niobe_qfprom},
+	{ .compatible = "qcom,pineapple-qfprom", .data = &pineapple_qfprom},
 	{/* sentinel */},
 };
 MODULE_DEVICE_TABLE(of, qfprom_of_match);

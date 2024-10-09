@@ -5,7 +5,7 @@
  * Based on original driver:
  * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
  *
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/bitfield.h>
@@ -220,6 +220,7 @@ struct adc_tm5_channel {
  * @avg_samples: ability to provide single result from the ADC
  *      that is an average of multiple measurements. Applies to all
  *      channels, used only on Gen1 ADC_TM.
+ * @irq: adc-tm interrupt, triggered when temperature violations happen.
  * @base: base address of TM registers.
  * @adc_mutex_lock: ADC_TM mutex lock, used only on Gen2 ADC_TM.
  *      It is used to ensure only one ADC channel configuration
@@ -234,6 +235,7 @@ struct adc_tm5_chip {
 	unsigned int		nchannels;
 	unsigned int		decimation;
 	unsigned int		avg_samples;
+	int			irq;
 	u16			base;
 	struct mutex		adc_mutex_lock;
 };
@@ -665,17 +667,28 @@ static const struct thermal_zone_device_ops adc_tm5_thermal_ops = {
 	.set_trips = adc_tm5_set_trips,
 };
 
-static int adc_tm5_register_tzd(struct adc_tm5_chip *adc_tm)
+static const struct thermal_zone_device_ops adc_tm5_thermal_iio_ops = {
+	.get_temp = adc_tm5_get_temp,
+};
+
+static int adc_tm5_register_tzd(struct adc_tm5_chip *adc_tm, bool set_trips)
 {
 	unsigned int i;
 	struct thermal_zone_device *tzd;
 
 	for (i = 0; i < adc_tm->nchannels; i++) {
 		adc_tm->channels[i].chip = adc_tm;
-		tzd = devm_thermal_of_zone_register(adc_tm->dev,
-						    adc_tm->channels[i].channel,
-						    &adc_tm->channels[i],
-						    &adc_tm5_thermal_ops);
+		if (set_trips)
+			tzd = devm_thermal_of_zone_register(adc_tm->dev,
+						   adc_tm->channels[i].channel,
+						   &adc_tm->channels[i],
+						   &adc_tm5_thermal_ops);
+		else
+			tzd = devm_thermal_of_zone_register(adc_tm->dev,
+						   adc_tm->channels[i].channel,
+						   &adc_tm->channels[i],
+						   &adc_tm5_thermal_iio_ops);
+
 		if (IS_ERR(tzd)) {
 			if (PTR_ERR(tzd) == -ENODEV) {
 				dev_warn(adc_tm->dev, "thermal sensor on channel %d is not used\n",
@@ -1006,7 +1019,7 @@ static int adc_tm5_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct adc_tm5_chip *adc_tm;
 	struct regmap *regmap;
-	int ret, irq;
+	int ret;
 	u32 reg;
 
 	regmap = dev_get_regmap(dev->parent, NULL);
@@ -1025,15 +1038,25 @@ static int adc_tm5_probe(struct platform_device *pdev)
 	adc_tm->dev = dev;
 	adc_tm->base = reg;
 
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0)
-		return irq;
-
 	ret = adc_tm5_get_dt_data(adc_tm, node);
 	if (ret) {
 		dev_err(dev, "get dt data failed: %d\n", ret);
 		return ret;
 	}
+
+	if (of_device_is_compatible(node, "qcom,spmi-adc-tm5-iio")) {
+		ret = adc_tm5_register_tzd(adc_tm, false);
+		if (ret)
+			dev_err(dev, "tzd register failed for adc tm5 iio channel\n");
+
+		return ret;
+	}
+
+	adc_tm->irq = platform_get_irq(pdev, 0);
+	if (adc_tm->irq < 0)
+		return adc_tm->irq;
+
+	dev_set_drvdata(dev, adc_tm);
 
 	ret = adc_tm->data->init(adc_tm);
 	if (ret) {
@@ -1041,15 +1064,53 @@ static int adc_tm5_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = adc_tm5_register_tzd(adc_tm);
+	ret = adc_tm5_register_tzd(adc_tm, true);
 	if (ret) {
 		dev_err(dev, "tzd register failed\n");
 		return ret;
 	}
 
-	return devm_request_threaded_irq(dev, irq, NULL, adc_tm->data->isr,
-			IRQF_ONESHOT, adc_tm->data->irq_name, adc_tm);
+	return devm_request_threaded_irq(dev, adc_tm->irq, NULL,
+			adc_tm->data->isr, IRQF_ONESHOT,
+				adc_tm->data->irq_name, adc_tm);
 }
+
+static int adc_tm_restore(struct device *dev)
+{
+	struct adc_tm5_chip *adc_tm = dev_get_drvdata(dev);
+	int ret;
+
+	if (adc_tm->irq > 0) {
+		ret = devm_request_threaded_irq(dev, adc_tm->irq, NULL,
+				adc_tm->data->isr, IRQF_ONESHOT,
+					adc_tm->data->irq_name, adc_tm);
+		if (ret < 0)
+			return ret;
+	}
+
+	ret = adc_tm->data->init(adc_tm);
+	if (ret < 0)
+		dev_err(dev, "init failed\n");
+
+	return ret;
+}
+
+static int adc_tm_freeze(struct device *dev)
+{
+	struct adc_tm5_chip *adc_tm = dev_get_drvdata(dev);
+
+	if (adc_tm->irq > 0) {
+		disable_irq(adc_tm->irq);
+		devm_free_irq(dev, adc_tm->irq, adc_tm);
+	}
+
+	return 0;
+}
+
+static const struct dev_pm_ops adc_tm_pm_ops = {
+	.freeze = adc_tm_freeze,
+	.restore = adc_tm_restore,
+};
 
 static const struct of_device_id adc_tm5_match_table[] = {
 	{
@@ -1064,6 +1125,10 @@ static const struct of_device_id adc_tm5_match_table[] = {
 		.compatible = "qcom,spmi-adc-tm5-gen2",
 		.data = &adc_tm5_gen2_data_pmic,
 	},
+	{
+		.compatible = "qcom,spmi-adc-tm5-iio",
+		.data = &adc_tm5_data_pmic,
+	},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, adc_tm5_match_table);
@@ -1072,6 +1137,7 @@ static struct platform_driver adc_tm5_driver = {
 	.driver = {
 		.name = "qcom-spmi-adc-tm5",
 		.of_match_table = adc_tm5_match_table,
+		.pm = &adc_tm_pm_ops,
 	},
 	.probe = adc_tm5_probe,
 };

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+// Copyright (c) 2023-24, Qualcomm Innovation Center, Inc. All rights reserved.
 
 #include <linux/module.h>
 #include <linux/of.h>
@@ -21,6 +22,11 @@ enum {
 	EAST,
 	WEST
 };
+#define NUM_TILES       4
+#define HMSS_WEST       0x000BB000
+#define HMSS_EAST       0x000B7000
+#define HMSS_NORTH      0x000BC000
+#define HMSS_SOUTH      0x000BE000
 
 #define FUNCTION(fname)					\
 	[msm_mux_##fname] = {				\
@@ -53,9 +59,15 @@ enum {
 		.intr_status_reg = 0x1000 * id + 0xc,	\
 		.intr_target_reg = 0x1000 * id + 0x8,	\
 		.tile = _tile,			\
+		.dir_conn_reg = _tile == WEST ? HMSS_WEST : \
+				_tile == EAST ? HMSS_EAST : \
+				_tile == NORTH ? HMSS_NORTH : \
+				HMSS_SOUTH, \
 		.mux_bit = 2,			\
 		.pull_bit = 0,			\
 		.drv_bit = 6,			\
+		.egpio_enable = 12,		\
+		.egpio_present = 11,		\
 		.oe_bit = 9,			\
 		.in_bit = 0,			\
 		.out_bit = 1,			\
@@ -67,6 +79,7 @@ enum {
 		.intr_polarity_bit = 1,		\
 		.intr_detection_bit = 2,	\
 		.intr_detection_width = 2,	\
+		.dir_conn_en_bit = 8,       \
 	}
 
 #define SDC_QDSD_PINGROUP(pg_name, ctl, pull, drv)	\
@@ -525,6 +538,7 @@ enum sm8150_functions {
 	msm_mux_ddr_pxi2,
 	msm_mux_ddr_pxi3,
 	msm_mux_edp_hot,
+	msm_mux_egpio,
 	msm_mux_edp_lcd,
 	msm_mux_emac_phy,
 	msm_mux_emac_pps,
@@ -1006,6 +1020,14 @@ static const char * const gpio_groups[] = {
 	"gpio171", "gpio172", "gpio173", "gpio174",
 };
 
+static const char * const egpio_groups[] = {
+	"gpio155", "gpio156", "gpio157", "gpio158",
+	"gpio159", "gpio160", "gpio161", "gpio162",
+	"gpio163", "gpio164", "gpio165", "gpio166",
+	"gpio167", "gpio168",
+	"gpio169", "gpio172", "gpio173", "gpio174",
+};
+
 static const char * const qup6_groups[] = {
 	"gpio4", "gpio5", "gpio6", "gpio7",
 };
@@ -1260,6 +1282,7 @@ static const struct msm_function sm8150_functions[] = {
 	FUNCTION(qspi_clk),
 	FUNCTION(qspi_cs),
 	FUNCTION(qua_mi2s),
+	FUNCTION(egpio),
 	FUNCTION(qup0),
 	FUNCTION(qup1),
 	FUNCTION(qup2),
@@ -1474,26 +1497,26 @@ static const struct msm_pingroup sm8150_groups[] = {
 	[152] = PINGROUP(152, SOUTH, lpass_slimbus, spkr_i2s, _, _, _, _, _, _, _),
 	[153] = PINGROUP(153, SOUTH, btfm_slimbus, _, _, _, _, _, _, _, _),
 	[154] = PINGROUP(154, SOUTH, btfm_slimbus, _, _, _, _, _, _, _, _),
-	[155] = PINGROUP(155, WEST, hs1_mi2s, _, _, _, _, _, _, _, _),
-	[156] = PINGROUP(156, WEST, hs1_mi2s, _, _, _, _, _, _, _, _),
-	[157] = PINGROUP(157, WEST, hs1_mi2s, _, _, _, _, _, _, _, _),
-	[158] = PINGROUP(158, WEST, hs1_mi2s, _, _, _, _, _, _, _, _),
-	[159] = PINGROUP(159, WEST, hs1_mi2s, cri_trng0, _, _, _, _, _, _, _),
-	[160] = PINGROUP(160, WEST, hs2_mi2s, cri_trng1, _, _, _, _, _, _, _),
-	[161] = PINGROUP(161, WEST, hs2_mi2s, cri_trng, _, _, _, _, _, _, _),
-	[162] = PINGROUP(162, WEST, hs2_mi2s, sp_cmu, _, _, _, _, _, _, _),
-	[163] = PINGROUP(163, WEST, hs2_mi2s, prng_rosc, _, _, _, _, _, _, _),
-	[164] = PINGROUP(164, WEST, hs2_mi2s, _, _, _, _, _, _, _, _),
-	[165] = PINGROUP(165, WEST, hs3_mi2s, _, _, _, _, _, _, _, _),
-	[166] = PINGROUP(166, WEST, hs3_mi2s, _, _, _, _, _, _, _, _),
-	[167] = PINGROUP(167, WEST, hs3_mi2s, _, _, _, _, _, _, _, _),
-	[168] = PINGROUP(168, WEST, hs3_mi2s, _, _, _, _, _, _, _, _),
-	[169] = PINGROUP(169, NORTH, _, _, _, _, _, _, _, _, _),
+	[155] = PINGROUP(155, WEST, hs1_mi2s, _, _, _, _, _, _, _, egpio),
+	[156] = PINGROUP(156, WEST, hs1_mi2s, _, _, _, _, _, _, _, egpio),
+	[157] = PINGROUP(157, WEST, hs1_mi2s, _, _, _, _, _, _, _, egpio),
+	[158] = PINGROUP(158, WEST, hs1_mi2s, _, _, _, _, _, _, _, egpio),
+	[159] = PINGROUP(159, WEST, hs1_mi2s, cri_trng0, _, _, _, _, _, _, egpio),
+	[160] = PINGROUP(160, WEST, hs2_mi2s, cri_trng1, _, _, _, _, _, _, egpio),
+	[161] = PINGROUP(161, WEST, hs2_mi2s, cri_trng, _, _, _, _, _, _, egpio),
+	[162] = PINGROUP(162, WEST, hs2_mi2s, sp_cmu, _, _, _, _, _, _, egpio),
+	[163] = PINGROUP(163, WEST, hs2_mi2s, prng_rosc, _, _, _, _, _, _, egpio),
+	[164] = PINGROUP(164, WEST, hs2_mi2s, _, _, _, _, _, _, _, egpio),
+	[165] = PINGROUP(165, WEST, hs3_mi2s, _, _, _, _, _, _, _, egpio),
+	[166] = PINGROUP(166, WEST, hs3_mi2s, _, _, _, _, _, _, _, egpio),
+	[167] = PINGROUP(167, WEST, hs3_mi2s, _, _, _, _, _, _, _, egpio),
+	[168] = PINGROUP(168, WEST, hs3_mi2s, _, _, _, _, _, _, _, egpio),
+	[169] = PINGROUP(169, NORTH, _, _, _, _, _, _, _, _, egpio),
 	[170] = PINGROUP(170, NORTH, _, _, _, _, _, _, _, _, _),
 	[171] = PINGROUP(171, NORTH, _, _, _, _, _, _, _, _, _),
-	[172] = PINGROUP(172, NORTH, _, _, _, _, _, _, _, _, _),
-	[173] = PINGROUP(173, NORTH, _, _, _, _, _, _, _, _, _),
-	[174] = PINGROUP(174, NORTH, _, _, _, _, _, _, _, _, _),
+	[172] = PINGROUP(172, NORTH, _, _, _, _, _, _, _, _, egpio),
+	[173] = PINGROUP(173, NORTH, _, _, _, _, _, _, _, _, egpio),
+	[174] = PINGROUP(174, NORTH, _, _, _, _, _, _, _, _, egpio),
 	[175] = UFS_RESET(ufs_reset, 0xB6000),
 	[176] = SDC_QDSD_PINGROUP(sdc2_clk, 0xB2000, 14, 6),
 	[177] = SDC_QDSD_PINGROUP(sdc2_cmd, 0xB2000, 11, 3),
@@ -1504,19 +1527,30 @@ static const struct msm_gpio_wakeirq_map sm8150_pdc_map[] = {
 	{ 3, 31 }, { 5, 32 }, { 8, 33 }, { 9, 34 }, { 10, 100 },
 	{ 12, 104 }, { 24, 37 }, { 26, 38 }, { 27, 41 }, { 28, 42 },
 	{ 30, 39 }, { 36, 43 }, { 37, 44 }, { 38, 30 }, { 39, 118 },
-	{ 39, 125 }, { 41, 47 }, { 42, 48 }, { 46, 50 }, { 47, 49 },
-	{ 48, 51 }, { 49, 53 }, { 50, 52 }, { 51, 116 }, { 51, 123 },
-	{ 53, 54 }, { 54, 55 }, { 55, 56 }, { 56, 57 }, { 58, 58 },
-	{ 60, 60 }, { 61, 61 }, { 68, 62 }, { 70, 63 }, { 76, 71 },
-	{ 77, 66 }, { 81, 64 }, { 83, 65 }, { 86, 67 }, { 87, 84 },
-	{ 88, 117 }, { 88, 124 }, { 90, 69 }, { 91, 70 }, { 93, 75 },
-	{ 95, 72 }, { 96, 73 }, { 97, 74 }, { 101, 40 }, { 103, 77 },
-	{ 104, 78 }, { 108, 79 }, { 112, 80 }, { 113, 81 }, { 114, 82 },
-	{ 117, 85 }, { 118, 101 }, { 119, 87 }, { 120, 88 }, { 121, 89 },
-	{ 122, 90 }, { 123, 91 }, { 124, 92 }, { 125, 93 }, { 129, 94 },
-	{ 132, 105 }, { 133, 83 }, { 134, 36 }, { 136, 97 }, { 142, 103 },
-	{ 144, 115 }, { 144, 122 }, { 147, 102 }, { 150, 107 },
-	{ 152, 108 }, { 153, 109 }
+	{ 41, 47 }, { 42, 48 }, { 46, 50 }, { 47, 49 }, { 48, 51 },
+	{ 49, 53 }, { 50, 52 }, { 51, 116 }, { 53, 54 }, { 54, 55 },
+	{ 55, 56 }, { 56, 57 }, { 58, 58 }, { 60, 60 }, { 61, 61 },
+	{ 68, 62 }, { 70, 63 }, { 76, 71 }, { 77, 66 }, { 81, 64 },
+	{ 83, 65 }, { 86, 67 }, { 87, 84 }, { 88, 117 }, { 90, 69 },
+	{ 91, 70 }, { 93, 75 }, { 95, 72 }, { 96, 73 }, { 97, 74 },
+	{ 101, 40 }, { 103, 77 }, { 104, 78 }, { 108, 79 }, { 112, 80 },
+	{ 113, 81 }, { 114, 82 }, { 117, 85 }, { 118, 101 }, { 119, 87 },
+	{ 120, 88 }, { 121, 89 }, { 122, 90 }, { 123, 91 }, { 124, 92 },
+	{ 125, 93 }, { 129, 94 }, { 132, 105 }, { 133, 83 }, { 134, 36 },
+	{ 136, 97 }, { 142, 103 }, { 144, 115 }, { 147, 102 }, { 150, 107 },
+	{ 152, 108 }, { 153, 109 },
+};
+
+static struct msm_dir_conn sm8150_dir_conn[] = {
+	{-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}, {-1, 0},
+	{-1, 0}, {-1, 0}, {-1, 0}, {-1, 0}
+};
+
+static u32 tile_dir_conn_addr[NUM_TILES] = {
+	[0] =   HMSS_NORTH,
+	[1] =   HMSS_SOUTH,
+	[2] =   HMSS_EAST,
+	[3] =   HMSS_WEST
 };
 
 static const struct msm_pinctrl_soc_data sm8150_pinctrl = {
@@ -1532,10 +1566,56 @@ static const struct msm_pinctrl_soc_data sm8150_pinctrl = {
 	.wakeirq_map = sm8150_pdc_map,
 	.nwakeirq_map = ARRAY_SIZE(sm8150_pdc_map),
 	.wakeirq_dual_edge_errata = true,
+	.dir_conn_addr = tile_dir_conn_addr,
+	.dir_conn = sm8150_dir_conn,
+	.egpio_func = 9,
 };
+
+static int sm8150_pinctrl_dirconn_list_probe(struct platform_device *pdev)
+{
+	int ret, n, dirconn_list_count, m;
+	struct device_node *np = pdev->dev.of_node;
+
+	n = of_property_count_elems_of_size(np, "qcom,dirconn-list",
+									sizeof(u32));
+	if (n <= 0 || n % 2)
+		return -EINVAL;
+
+	m = ARRAY_SIZE(sm8150_dir_conn) - 1;
+
+	dirconn_list_count = n / 2;
+
+	for (n = 0; n < dirconn_list_count; n++) {
+		ret = of_property_read_u32_index(np, "qcom,dirconn-list",
+						n * 2 + 0,
+						&sm8150_dir_conn[m].gpio);
+		if (ret)
+			return ret;
+		ret = of_property_read_u32_index(np, "qcom,dirconn-list",
+						n * 2 + 1,
+						&sm8150_dir_conn[m].irq);
+		if (ret)
+			return ret;
+		m--;
+	}
+
+	return 0;
+}
+
 
 static int sm8150_pinctrl_probe(struct platform_device *pdev)
 {
+	int len, ret;
+
+	if (of_find_property(pdev->dev.of_node, "qcom,dirconn-list", &len)) {
+		ret = sm8150_pinctrl_dirconn_list_probe(pdev);
+		if (ret) {
+			dev_err(&pdev->dev,
+					"Unable to parse Direct Connect List\n");
+			return ret;
+		}
+	}
+
 	return msm_pinctrl_probe(pdev, &sm8150_pinctrl);
 }
 

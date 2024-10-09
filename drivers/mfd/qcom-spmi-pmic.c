@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2014, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2015, 2017-2020, The Linux Foundation.
+ * All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/device.h>
@@ -12,6 +14,7 @@
 #include <linux/types.h>
 #include <linux/regmap.h>
 #include <linux/of_platform.h>
+#include <linux/qti-regmap-debugfs.h>
 #include <soc/qcom/qcom-spmi-pmic.h>
 
 #define PMIC_REV2		0x101
@@ -250,15 +253,29 @@ static const struct regmap_config spmi_regmap_config = {
 	.fast_io	= true,
 };
 
+static const struct regmap_config spmi_regmap_can_sleep_config = {
+	.reg_bits	= 16,
+	.val_bits	= 8,
+	.max_register	= 0xffff,
+	.fast_io	= false,
+};
+
 static int pmic_spmi_probe(struct spmi_device *sdev)
 {
+	struct device_node *root = sdev->dev.of_node;
 	struct regmap *regmap;
 	struct qcom_spmi_dev *ctx;
 	int ret;
 
-	regmap = devm_regmap_init_spmi_ext(sdev, &spmi_regmap_config);
+	if (of_property_read_bool(root, "qcom,can-sleep"))
+		regmap = devm_regmap_init_spmi_ext(sdev,
+						&spmi_regmap_can_sleep_config);
+	else
+		regmap = devm_regmap_init_spmi_ext(sdev, &spmi_regmap_config);
 	if (IS_ERR(regmap))
 		return PTR_ERR(regmap);
+
+	devm_regmap_qti_debugfs_register(&sdev->dev, regmap);
 
 	ctx = devm_kzalloc(&sdev->dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
@@ -301,7 +318,18 @@ static struct spmi_driver pmic_spmi_driver = {
 		.of_match_table = pmic_spmi_id_table,
 	},
 };
-module_spmi_driver(pmic_spmi_driver);
+
+static int __init pmic_spmi_init(void)
+{
+	return spmi_driver_register(&pmic_spmi_driver);
+}
+arch_initcall(pmic_spmi_init);
+
+static void __exit pmic_spmi_exit(void)
+{
+	spmi_driver_unregister(&pmic_spmi_driver);
+}
+module_exit(pmic_spmi_exit);
 
 MODULE_DESCRIPTION("Qualcomm SPMI PMIC driver");
 MODULE_ALIAS("spmi:spmi-pmic");

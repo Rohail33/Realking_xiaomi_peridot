@@ -32,3 +32,9 @@ subdir-y += tesla
 subdir-y += ti
 subdir-y += toshiba
 subdir-y += xilinx
+
+dtstree := $(srctree)/$(src)
+vendor  := $(dtstree)/vendor
+ifneq "$(wildcard $(vendor)/Makefile)" ""
+	subdir-y += vendor
+endif

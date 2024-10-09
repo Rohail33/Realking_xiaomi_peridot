@@ -2,6 +2,7 @@
 /*
  * Copyright(C) 2016 Linaro Limited. All rights reserved.
  * Author: Mathieu Poirier <mathieu.poirier@linaro.org>
+ * Copyright (c) 2022, 2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/atomic.h>
@@ -32,10 +33,17 @@ static int __tmc_etb_enable_hw(struct tmc_drvdata *drvdata)
 	}
 
 	writel_relaxed(TMC_MODE_CIRCULAR_BUFFER, drvdata->base + TMC_MODE);
-	writel_relaxed(TMC_FFCR_EN_FMT | TMC_FFCR_EN_TI |
-		       TMC_FFCR_FON_FLIN | TMC_FFCR_FON_TRIG_EVT |
-		       TMC_FFCR_TRIGON_TRIGIN,
-		       drvdata->base + TMC_FFCR);
+	if (drvdata->stop_on_flush) {
+		writel_relaxed(TMC_FFCR_EN_FMT | TMC_FFCR_EN_TI |
+			       TMC_FFCR_FON_FLIN | TMC_FFCR_FON_TRIG_EVT |
+			       TMC_FFCR_TRIGON_TRIGIN | TMC_FFCR_STOP_ON_FLUSH,
+			       drvdata->base + TMC_FFCR);
+	} else {
+		writel_relaxed(TMC_FFCR_EN_FMT | TMC_FFCR_EN_TI |
+			       TMC_FFCR_FON_FLIN | TMC_FFCR_FON_TRIG_EVT |
+			       TMC_FFCR_TRIGON_TRIGIN,
+			       drvdata->base + TMC_FFCR);
+	}
 
 	writel_relaxed(drvdata->trigger_cntr, drvdata->base + TMC_TRG);
 	tmc_enable_hw(drvdata);
@@ -84,7 +92,14 @@ static void __tmc_etb_disable_hw(struct tmc_drvdata *drvdata)
 {
 	CS_UNLOCK(drvdata->base);
 
+	/* Check if the etf already disabled*/
+	if (!(readl_relaxed(drvdata->base + TMC_CTL) & TMC_CTL_CAPT_EN)) {
+		CS_LOCK(drvdata->base);
+		return;
+	}
+
 	tmc_flush_and_stop(drvdata);
+	tmc_disable_stop_on_flush(drvdata);
 	/*
 	 * When operating in sysFS mode the content of the buffer needs to be
 	 * read before the TMC is disabled.
@@ -232,7 +247,8 @@ static int tmc_enable_etf_sink_sysfs(struct coresight_device *csdev)
 		atomic_inc(csdev->refcnt);
 	} else {
 		/* Free up the buffer if we failed to enable */
-		used = false;
+		kfree(drvdata->buf);
+		drvdata->buf = NULL;
 	}
 out:
 	spin_unlock_irqrestore(&drvdata->spinlock, flags);
@@ -252,6 +268,9 @@ static int tmc_enable_etf_sink_perf(struct coresight_device *csdev, void *data)
 	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
 	struct perf_output_handle *handle = data;
 	struct cs_buffers *buf = etm_perf_sink_config(handle);
+
+	if (buf == NULL)
+		return -EINVAL;
 
 	spin_lock_irqsave(&drvdata->spinlock, flags);
 	do {
@@ -661,7 +680,6 @@ int tmc_read_unprepare_etb(struct tmc_drvdata *drvdata)
 	char *buf = NULL;
 	enum tmc_mode mode;
 	unsigned long flags;
-	int rc = 0;
 
 	/* config types are set a boot time and never change */
 	if (WARN_ON_ONCE(drvdata->config_type != TMC_CONFIG_TYPE_ETB &&
@@ -687,11 +705,7 @@ int tmc_read_unprepare_etb(struct tmc_drvdata *drvdata)
 		 * can't be NULL.
 		 */
 		memset(drvdata->buf, 0, drvdata->size);
-		rc = __tmc_etb_enable_hw(drvdata);
-		if (rc) {
-			spin_unlock_irqrestore(&drvdata->spinlock, flags);
-			return rc;
-		}
+		 __tmc_etb_enable_hw(drvdata);
 	} else {
 		/*
 		 * The ETB/ETF is not tracing and the buffer was just read.

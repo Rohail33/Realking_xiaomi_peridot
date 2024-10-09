@@ -205,6 +205,7 @@ struct stmmac_priv {
 	u32 tx_coal_frames[MTL_MAX_TX_QUEUES];
 	u32 tx_coal_timer[MTL_MAX_TX_QUEUES];
 	u32 rx_coal_frames[MTL_MAX_TX_QUEUES];
+	bool tx_coal_timer_disable;
 
 	int hwts_tx_en;
 	bool tx_path_in_lpi_mode;
@@ -223,6 +224,7 @@ struct stmmac_priv {
 	struct mac_device_info *hw;
 	int (*hwif_quirks)(struct stmmac_priv *priv);
 	struct mutex lock;
+	struct phy_device *phydev;
 
 	struct stmmac_dma_conf dma_conf;
 
@@ -324,6 +326,10 @@ struct stmmac_priv {
 	/* XDP BPF Program */
 	unsigned long *af_xdp_zc_qps;
 	struct bpf_prog *xdp_prog;
+	bool phy_irq_enabled;
+	bool boot_kpi;
+	bool early_eth;
+	bool early_eth_config_set;
 };
 
 enum stmmac_state {
@@ -332,6 +338,9 @@ enum stmmac_state {
 	STMMAC_RESETING,
 	STMMAC_SERVICE_SCHED,
 };
+
+#define GET_MEM_PDEV_DEV (priv->plat->stmmac_emb_smmu_ctx.valid ? \
+			&priv->plat->stmmac_emb_smmu_ctx.smmu_pdev->dev : priv->device)
 
 int stmmac_mdio_unregister(struct net_device *ndev);
 int stmmac_mdio_register(struct net_device *ndev);

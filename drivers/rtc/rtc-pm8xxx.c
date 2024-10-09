@@ -11,6 +11,7 @@
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/suspend.h>
 
 /* RTC Register offsets from RTC CTRL REG */
 #define PM8XXX_ALARM_CTRL_OFFSET	0x01
@@ -54,6 +55,7 @@ struct pm8xxx_rtc_regs {
  * @regs:		rtc registers description.
  * @rtc_dev:		device structure.
  * @ctrl_reg_lock:	spinlock protecting access to ctrl_reg.
+ * @deepsleep_support:	deepsleep_support used to check the status of enablement
  */
 struct pm8xxx_rtc {
 	struct rtc_device *rtc;
@@ -63,6 +65,7 @@ struct pm8xxx_rtc {
 	const struct pm8xxx_rtc_regs *regs;
 	struct device *rtc_dev;
 	spinlock_t ctrl_reg_lock;
+	bool deepsleep_support;
 };
 
 /*
@@ -528,9 +531,42 @@ static int pm8xxx_rtc_probe(struct platform_device *pdev)
 	if (rc)
 		return rc;
 
-	rc = dev_pm_set_wake_irq(&pdev->dev, rtc_dd->rtc_alarm_irq);
-	if (rc)
+	if (!of_property_read_bool(pdev->dev.of_node, "qcom,disable-alarm-wakeup")) {
+		rc = dev_pm_set_wake_irq(&pdev->dev, rtc_dd->rtc_alarm_irq);
+		if (rc)
+			return rc;
+	}
+
+	if (of_property_read_bool(pdev->dev.of_node, "qcom,support-deepsleep"))
+		rtc_dd->deepsleep_support = true;
+
+	return 0;
+}
+
+static int pm8xxx_rtc_restore(struct device *dev)
+{
+	struct pm8xxx_rtc *rtc_dd = dev_get_drvdata(dev);
+	int rc;
+
+	/* Request the alarm IRQ */
+	rc = devm_request_any_context_irq(rtc_dd->rtc_dev,
+					  rtc_dd->rtc_alarm_irq,
+					  pm8xxx_alarm_trigger,
+					  IRQF_TRIGGER_RISING,
+					  "pm8xxx_rtc_alarm", rtc_dd);
+	if (rc < 0) {
+		dev_err(rtc_dd->rtc_dev, "Request IRQ failed (%d)\n", rc);
 		return rc;
+	}
+
+	return pm8xxx_rtc_enable(rtc_dd);
+}
+
+static int pm8xxx_rtc_freeze(struct device *dev)
+{
+	struct pm8xxx_rtc *rtc_dd = dev_get_drvdata(dev);
+
+	devm_free_irq(rtc_dd->rtc_dev, rtc_dd->rtc_alarm_irq, rtc_dd);
 
 	return 0;
 }
@@ -541,12 +577,38 @@ static int pm8xxx_remove(struct platform_device *pdev)
 	return 0;
 }
 
+static int pm8xxx_rtc_resume(struct device *dev)
+{
+	struct pm8xxx_rtc *rtc_dd = dev_get_drvdata(dev);
+
+	if (rtc_dd->deepsleep_support && (pm_suspend_target_state == PM_SUSPEND_MEM))
+		return pm8xxx_rtc_restore(dev);
+	return 0;
+}
+
+static int pm8xxx_rtc_suspend(struct device *dev)
+{
+	struct pm8xxx_rtc *rtc_dd = dev_get_drvdata(dev);
+
+	if (rtc_dd->deepsleep_support && (pm_suspend_target_state == PM_SUSPEND_MEM))
+		return pm8xxx_rtc_freeze(dev);
+	return 0;
+}
+
+static const struct dev_pm_ops pm8xxx_rtc_pm_ops = {
+	.freeze = pm8xxx_rtc_freeze,
+	.restore = pm8xxx_rtc_restore,
+	.suspend = pm8xxx_rtc_suspend,
+	.resume = pm8xxx_rtc_resume,
+};
+
 static struct platform_driver pm8xxx_rtc_driver = {
 	.probe		= pm8xxx_rtc_probe,
 	.remove		= pm8xxx_remove,
 	.driver	= {
 		.name		= "rtc-pm8xxx",
 		.of_match_table	= pm8xxx_id_table,
+		.pm             = &pm8xxx_rtc_pm_ops,
 	},
 };
 

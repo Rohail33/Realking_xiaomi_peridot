@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//#define DEBUG
+/*
+ * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ */
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 #include <linux/blkdev.h>
@@ -16,6 +18,13 @@
 #include <linux/blk-mq-virtio.h>
 #include <linux/numa.h>
 #include <uapi/linux/virtio_ring.h>
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+#include <trace/events/gh_virtio_frontend.h>
+#endif
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+#include <linux/blk-crypto-profile.h>
+#include "virtio_blk_qti_crypto.h"
+#endif
 
 #define PART_BITS 4
 #define VQ_NAME_LEN 16
@@ -23,6 +32,13 @@
 
 /* The maximum number of sg elements that fit into a virtqueue */
 #define VIRTIO_BLK_MAX_SG_ELEMS 32768
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+/* ICE feature bits needs to be moved to uapi headers.*/
+/* support ice virtualization */
+#define VIRTIO_BLK_F_ICE        23
+/* support ice virtualization with iv (initialization vector) */
+#define VIRTIO_BLK_F_ICE_IV     22
+#endif
 
 #ifdef CONFIG_ARCH_NO_SG_CHAIN
 #define VIRTIO_BLK_INLINE_SG_CNT	0
@@ -82,8 +98,22 @@ struct virtio_blk {
 	struct virtio_blk_vq *vqs;
 };
 
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+struct virtio_blk_ice_info {
+	/*the key slot to use for inline crypto*/
+	u8  ice_slot;
+	u8  activate;
+	u16 reserved;
+	u32 reserved1;
+	u64 data_unit_num;
+} __packed;
+#endif
+
 struct virtblk_req {
 	struct virtio_blk_outhdr out_hdr;
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+	struct virtio_blk_ice_info ice_info;
+#endif
 	u8 status;
 	struct sg_table sg_table;
 	struct scatterlist sg[];
@@ -113,8 +143,20 @@ static int virtblk_add_req(struct virtqueue *vq, struct virtblk_req *vbr)
 {
 	struct scatterlist hdr, status, *sgs[3];
 	unsigned int num_out = 0, num_in = 0;
-
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+	/* Backend (HOST) expects to receive encryption info via extended
+	 * structure when ICE negotiation is successful which will be used
+	 * by backend ufs/sdhci host controller to program the descriptors
+	 * as per spec standards to enable the encryption on read/write
+	 * of data from/to disk.
+	 */
+	size_t const hdr_size = virtio_has_feature(vq->vdev, VIRTIO_BLK_F_ICE_IV) ?
+				sizeof(vbr->out_hdr) + sizeof(vbr->ice_info) :
+				sizeof(vbr->out_hdr);
+	sg_init_one(&hdr, &vbr->out_hdr, hdr_size);
+#else
 	sg_init_one(&hdr, &vbr->out_hdr, sizeof(vbr->out_hdr));
+#endif
 	sgs[num_out++] = &hdr;
 
 	if (vbr->sg_table.nents) {
@@ -289,6 +331,9 @@ static void virtblk_done(struct virtqueue *vq)
 
 			if (likely(!blk_should_fake_timeout(req->q)))
 				blk_mq_complete_request(req);
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+			trace_virtio_block_done(vq->vdev->index, req_op(req), blk_rq_pos(req));
+#endif
 			req_done = true;
 		}
 		if (unlikely(virtqueue_is_broken(vq)))
@@ -328,6 +373,25 @@ static blk_status_t virtblk_fail_to_queue(struct request *req, int rc)
 	}
 }
 
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+static void virtblk_get_ice_info(struct request *req)
+{
+	struct virtblk_req *vbr = blk_mq_rq_to_pdu(req);
+
+	/* whether or not the request needs inline crypto operations*/
+	if (!req || !req->crypt_keyslot) {
+		/* ice is not activated */
+		vbr->ice_info.activate = false;
+	} else {
+		vbr->ice_info.ice_slot = blk_crypto_keyslot_index(req->crypt_keyslot);
+		/* ice is activated - successful flow */
+		vbr->ice_info.activate = true;
+		/* data unit number i.e. iv value */
+		vbr->ice_info.data_unit_num = req->crypt_ctx->bc_dun[0];
+	}
+}
+#endif
+
 static blk_status_t virtblk_prep_rq(struct blk_mq_hw_ctx *hctx,
 					struct virtio_blk *vblk,
 					struct request *req,
@@ -340,6 +404,10 @@ static blk_status_t virtblk_prep_rq(struct blk_mq_hw_ctx *hctx,
 	if (unlikely(status))
 		return status;
 
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+	if (virtio_has_feature(vblk->vdev, VIRTIO_BLK_F_ICE_IV))
+		virtblk_get_ice_info(req);
+#endif
 	num = virtblk_map_data(hctx, req, vbr);
 	if (unlikely(num < 0))
 		return virtblk_fail_to_queue(req, -ENOMEM);
@@ -368,6 +436,10 @@ static blk_status_t virtio_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	spin_lock_irqsave(&vblk->vqs[qid].lock, flags);
 	err = virtblk_add_req(vblk->vqs[qid].vq, vbr);
+#ifdef CONFIG_GH_VIRTIO_DEBUG
+	trace_virtio_block_submit(vblk->vqs[qid].vq->vdev->index,
+		vbr->out_hdr.type, vbr->out_hdr.sector, vbr->out_hdr.ioprio, err);
+#endif
 	if (err) {
 		virtqueue_kick(vblk->vqs[qid].vq);
 		/* Don't stop the queue if -ENOMEM: we may have failed to
@@ -1152,8 +1224,17 @@ static int virtblk_probe(struct virtio_device *vdev)
 	}
 
 	virtblk_update_capacity(vblk, false);
-	virtio_device_ready(vdev);
 
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+	if (virtio_has_feature(vblk->vdev, VIRTIO_BLK_F_ICE_IV)) {
+		dev_notice(&vdev->dev, "%s\n", vblk->disk->disk_name);
+		/* Initilaize supported crypto capabilities*/
+		err = virtblk_init_crypto_qti_spec(&vblk->vdev->dev);
+		if (!err)
+			virtblk_crypto_qti_crypto_register(vblk->disk->queue);
+	}
+#endif
+	virtio_device_ready(vdev);
 	err = device_add_disk(&vdev->dev, vblk->disk, virtblk_attr_groups);
 	if (err)
 		goto out_cleanup_disk;
@@ -1256,6 +1337,9 @@ static unsigned int features[] = {
 	VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_TOPOLOGY, VIRTIO_BLK_F_CONFIG_WCE,
 	VIRTIO_BLK_F_MQ, VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_WRITE_ZEROES,
 	VIRTIO_BLK_F_SECURE_ERASE,
+#if IS_ENABLED(CONFIG_QTI_CRYPTO_VIRTUALIZATION)
+	VIRTIO_BLK_F_ICE, VIRTIO_BLK_F_ICE_IV,
+#endif
 };
 
 static struct virtio_driver virtio_blk = {
